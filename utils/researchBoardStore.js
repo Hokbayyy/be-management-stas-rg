@@ -355,8 +355,20 @@ async function ensureResearchBoardTables() {
           file_size BIGINT,
           mime_type TEXT,
           uploaded_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+          is_pinned BOOLEAN NOT NULL DEFAULT FALSE,
+          pin_caption TEXT,
+          pinned_by TEXT,
+          pinned_at TIMESTAMPTZ,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
+      `);
+
+      await query(`
+        ALTER TABLE research_board_task_attachments
+          ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN NOT NULL DEFAULT FALSE,
+          ADD COLUMN IF NOT EXISTS pin_caption TEXT,
+          ADD COLUMN IF NOT EXISTS pinned_by TEXT,
+          ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ;
       `);
 
       await query(`
@@ -389,6 +401,11 @@ async function ensureResearchBoardTables() {
       await query(`
         CREATE INDEX IF NOT EXISTS idx_research_board_attachments_task
         ON research_board_task_attachments(task_id, created_at DESC)
+      `);
+
+      await query(`
+        CREATE INDEX IF NOT EXISTS idx_research_board_attachments_pinned
+        ON research_board_task_attachments(task_id, is_pinned DESC, created_at DESC)
       `);
 
       await query(`
@@ -757,7 +774,8 @@ async function fetchTaskCollection(projectId, { includeComments = false } = {}) 
     ),
     query(
       `
-      SELECT at.id, at.task_id, at.file_url, at.file_name, at.file_size, at.mime_type, at.uploaded_by, at.created_at
+      SELECT at.id, at.task_id, at.file_url, at.file_name, at.file_size, at.mime_type, at.uploaded_by, at.created_at,
+             at.is_pinned, at.pin_caption, at.pinned_by, at.pinned_at
       FROM research_board_task_attachments at
       WHERE at.task_id = ANY($1::text[])
       ORDER BY at.created_at DESC, at.id DESC
@@ -840,6 +858,14 @@ async function fetchTaskCollection(projectId, { includeComments = false } = {}) 
       mimeType: row.mime_type,
       uploaded_by: row.uploaded_by,
       uploadedBy: row.uploaded_by,
+      is_pinned: Boolean(row.is_pinned),
+      isPinned: Boolean(row.is_pinned),
+      pin_caption: row.pin_caption || null,
+      pinCaption: row.pin_caption || null,
+      pinned_by: row.pinned_by || null,
+      pinnedBy: row.pinned_by || null,
+      pinned_at: row.pinned_at || null,
+      pinnedAt: row.pinned_at || null,
       created_at: row.created_at,
       createdAt: row.created_at
     });

@@ -1120,7 +1120,7 @@ router.get(
           [taskIds]
         ),
         query(
-          `SELECT id, task_id, file_url, file_name, file_size, mime_type, created_at FROM research_board_task_attachments WHERE task_id = ANY($1::text[]) ORDER BY created_at DESC`,
+          `SELECT id, task_id, file_url, file_name, file_size, mime_type, created_at, is_pinned, pin_caption, pinned_by, pinned_at FROM research_board_task_attachments WHERE task_id = ANY($1::text[]) ORDER BY created_at DESC`,
           [taskIds]
         )
       ]);
@@ -1137,7 +1137,17 @@ router.get(
     const attachmentsMap = new Map();
     attachmentRows.forEach((at) => {
       if (!attachmentsMap.has(at.task_id)) attachmentsMap.set(at.task_id, []);
-      attachmentsMap.get(at.task_id).push(at);
+      attachmentsMap.get(at.task_id).push({
+        ...at,
+        is_pinned: Boolean(at.is_pinned),
+        isPinned: Boolean(at.is_pinned),
+        pin_caption: at.pin_caption || null,
+        pinCaption: at.pin_caption || null,
+        pinned_by: at.pinned_by || null,
+        pinnedBy: at.pinned_by || null,
+        pinned_at: at.pinned_at || null,
+        pinnedAt: at.pinned_at || null
+      });
     });
 
     const tasks = taskResult.rows.map((row) => ({
@@ -2541,6 +2551,74 @@ router.delete(
 
     const task = await fetchTaskDetail(req.params.id, req.params.taskId);
     res.json({ message: "Lampiran task berhasil dihapus.", task });
+  })
+);
+
+router.patch(
+  "/:id/board/tasks/:taskId/attachments/:attachmentId/pin",
+  asyncHandler(async (req, res) => {
+    await ensureResearchBoardTables();
+    const access = await getBoardAccessContext({ req, projectId: req.params.id });
+    if (!access.isManager) {
+      return res.status(403).json({
+        message: "Akses ditolak. Hanya ketua riset, dosen, atau admin yang dapat menyematkan lampiran."
+      });
+    }
+
+    const { isPinned, caption } = req.body || {};
+    const shouldPin = Boolean(isPinned);
+    const pinCaption = shouldPin ? String(caption || "").trim() : null;
+
+    let pinnedBy = null;
+    if (shouldPin) {
+      if (access.userId) {
+        try {
+          const userResult = await query(`SELECT name FROM users WHERE id = $1`, [access.userId]);
+          pinnedBy = userResult.rows[0]?.name || null;
+        } catch {
+          // fallback
+        }
+      }
+      if (!pinnedBy) {
+        pinnedBy = access.role === "dosen" ? "Dosen Pembimbing" : access.isLeaderMember ? "Ketua Riset" : "Admin";
+      }
+    }
+    const pinnedAt = shouldPin ? new Date() : null;
+
+    const result = await query(
+      `
+      UPDATE research_board_task_attachments
+      SET is_pinned = $1,
+          pin_caption = $2,
+          pinned_by = $3,
+          pinned_at = $4
+      WHERE task_id = $5 AND id = $6
+      RETURNING id, task_id, file_url, file_name, file_size, mime_type, created_at,
+                is_pinned, pin_caption, pinned_by, pinned_at
+      `,
+      [shouldPin, pinCaption, pinnedBy, pinnedAt, req.params.taskId, req.params.attachmentId]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "Lampiran task tidak ditemukan." });
+    }
+
+    const task = await fetchTaskDetail(req.params.id, req.params.taskId);
+    res.json({
+      message: shouldPin ? "Lampiran berhasil disematkan." : "Sematan lampiran berhasil dilepas.",
+      attachment: {
+        ...result.rows[0],
+        is_pinned: Boolean(result.rows[0].is_pinned),
+        isPinned: Boolean(result.rows[0].is_pinned),
+        pin_caption: result.rows[0].pin_caption,
+        pinCaption: result.rows[0].pin_caption,
+        pinned_by: result.rows[0].pinned_by,
+        pinnedBy: result.rows[0].pinned_by,
+        pinned_at: result.rows[0].pinned_at,
+        pinnedAt: result.rows[0].pinned_at
+      },
+      task
+    });
   })
 );
 
