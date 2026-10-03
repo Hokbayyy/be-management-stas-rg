@@ -613,13 +613,13 @@ async function getRequiredEvaluationMembers(projectId, sprintId, executor = quer
     LEFT JOIN research_memberships rm
       ON rm.project_id = $1 AND rm.user_id = u.id AND rm.status = 'Aktif'
     WHERE u.id IN (
-      SELECT rm2.user_id FROM research_memberships rm2
-      WHERE rm2.project_id = $1 AND rm2.status = 'Aktif'
-      UNION
       SELECT DISTINCT ta.user_id
-      FROM research_sprint_task_assignments a
-      JOIN research_board_task_assignees ta ON ta.task_id = a.task_id
-      WHERE a.sprint_id = $2
+      FROM research_board_task_assignees ta
+      WHERE ta.task_id IN (
+        SELECT a.task_id FROM research_sprint_task_assignments a WHERE a.sprint_id = $2
+        UNION
+        SELECT t.id FROM research_board_tasks t WHERE t.sprint_id = $2
+      )
     )
     ORDER BY u.name ASC, u.id ASC
     `,
@@ -638,13 +638,32 @@ async function getRequiredEvaluationMembers(projectId, sprintId, executor = quer
   }));
 }
 
-async function loadSprintReviewState({ projectId, sprintId, executor = query }) {
+async function loadSprintReviewState({ projectId, sprintId, executor = query, evaluatorUserId = null }) {
   const sprintResult = await runResearchQuery(
     executor,
     "SELECT * FROM research_sprints WHERE project_id = $1 AND id = $2 LIMIT 1",
     [projectId, sprintId]
   );
   if (sprintResult.rowCount === 0) throw createHttpError("Sprint tidak ditemukan.", 404);
+
+  // Auto-backfill task assignments for tasks belonging to this sprint
+  await runResearchQuery(
+    executor,
+    `
+    INSERT INTO research_sprint_task_assignments (
+      id, sprint_id, task_id, division_id_at_assignment, division_name_at_assignment,
+      story_points_at_assignment, status_at_assignment
+    )
+    SELECT 'SPRINT-TASK-' || MD5(task.sprint_id || ':' || task.id),
+           task.sprint_id, task.id, task.division_id, division.name,
+           task.story_points, task.status
+    FROM research_board_tasks task
+    LEFT JOIN research_divisions division ON division.id = task.division_id
+    WHERE task.sprint_id = $1
+    ON CONFLICT (sprint_id, task_id) DO NOTHING
+    `,
+    [sprintId]
+  );
 
   // A transaction client can execute only one query at a time. Keep these
   // reads sequential so review/finalize requests never overlap client.query.
@@ -751,13 +770,13 @@ async function loadSprintReviewState({ projectId, sprintId, executor = query }) 
   const finalizationErrors = [];
   if (sprintResult.rows[0].status !== "review") finalizationErrors.push({ code: "SPRINT_NOT_REVIEW", message: "Sprint harus berstatus review." });
   if (summaryResult.rows.length === 0 || !String(summaryResult.rows[0].summary || "").trim()) finalizationErrors.push({ code: "SUMMARY_REQUIRED", message: "Summary utama wajib diisi." });
-  if (!meetingResult.rows[0]?.meeting_date) finalizationErrors.push({ code: "MEETING_DATE_REQUIRED", message: "Tanggal Review Meeting wajib diisi." });
-  if (!String(meetingResult.rows[0]?.notes || "").trim() && !String(meetingResult.rows[0]?.decisions || "").trim()) finalizationErrors.push({ code: "MEETING_NOTES_REQUIRED", message: "Notes atau decisions Review Meeting wajib diisi." });
+  // Rapat Review removed from blocking requirements
   for (const member of requiredEvaluations) {
+    if (evaluatorUserId && String(member.id) === String(evaluatorUserId)) continue;
     if (!evaluationIds.has(member.id)) finalizationErrors.push({ code: "EVALUATION_REQUIRED", userId: member.id, message: `Evaluasi untuk ${member.name} wajib diisi.` });
   }
   for (const row of unfinishedRows) {
-    if (row.outcome === "pending") finalizationErrors.push({ code: "OUTCOME_REQUIRED", taskId: row.task_id, message: `Outcome untuk task ${row.title} wajib dipilih.` });
+    if (row.outcome === "pending" || !row.outcome) finalizationErrors.push({ code: "OUTCOME_REQUIRED", taskId: row.task_id, message: `Outcome untuk task ${row.title} wajib dipilih.` });
     if (row.outcome === "carry_over" && !row.target_sprint_id) finalizationErrors.push({ code: "CARRY_OVER_TARGET_REQUIRED", taskId: row.task_id, message: `Target Sprint untuk task ${row.title} wajib dipilih.` });
   }
   const carryTargets = [...new Set(unfinishedRows.filter((row) => row.outcome === "carry_over" && row.target_sprint_id).map((row) => row.target_sprint_id))];
@@ -812,7 +831,7 @@ function mapSummaryResponse(state) {
     divisionId: row.division_id_at_assignment || null,
     divisionName: row.division_name_at_assignment || "Belum Ada Divisi",
     storyPoints: Number(row.story_points_at_assignment || 0),
-    outcome: row.outcome,
+    outcome: row.outcome === "pending" ? null : row.outcome,
     targetSprintId: row.target_sprint_id,
     target_sprint_id: row.target_sprint_id
   }));
@@ -2902,7 +2921,8 @@ router.delete(
         [req.params.id, req.params.sprintId]
       );
       if (existing.rowCount === 0) throw createHttpError("Sprint tidak ditemukan.", 404);
-      if (existing.rows[0].status !== "planning") {
+      const isForce = req.query?.force === "true" || req.body?.force === true;
+      if (existing.rows[0].status !== "planning" && !isForce) {
         throw createHttpError("Hanya Sprint planning yang dapat dihapus.", 409, "SCRUM_SPRINT_DELETE_FORBIDDEN");
       }
       await client.query(
@@ -3131,12 +3151,27 @@ router.put(
       await client.query("BEGIN");
       await lockScrumProject(client, req.params.id);
       await requireReviewSprint({ client, projectId: req.params.id, sprintId: req.params.sprintId });
-      const assignment = await client.query(
+      let assignment = await client.query(
         `SELECT a.*, t.title FROM research_sprint_task_assignments a
          JOIN research_board_tasks t ON t.id = a.task_id
          WHERE a.sprint_id = $1 AND a.task_id = $2 FOR UPDATE`,
         [req.params.sprintId, req.params.taskId]
       );
+      if (assignment.rowCount === 0) {
+        const taskCheck = await client.query(
+          "SELECT id, sprint_id, title FROM research_board_tasks WHERE id = $1 AND sprint_id = $2",
+          [req.params.taskId, req.params.sprintId]
+        );
+        if (taskCheck.rowCount > 0) {
+          await upsertSprintTaskAssignment({ taskId: req.params.taskId, sprintId: req.params.sprintId, executor: client });
+          assignment = await client.query(
+            `SELECT a.*, t.title FROM research_sprint_task_assignments a
+             JOIN research_board_tasks t ON t.id = a.task_id
+             WHERE a.sprint_id = $1 AND a.task_id = $2 FOR UPDATE`,
+            [req.params.sprintId, req.params.taskId]
+          );
+        }
+      }
       if (assignment.rowCount === 0) throw createHttpError("Task tidak ditemukan pada Sprint tersebut.", 404);
       let targetSprintId = req.body?.targetSprintId ?? req.body?.target_sprint_id ?? null;
       if (outcome === "carry_over") {
@@ -3180,8 +3215,10 @@ router.post(
       if (sprintResult.rows[0].status !== "review") throw createHttpError("Sprint harus berstatus review sebelum difinalisasi.", 409, "SCRUM_SPRINT_NOT_REVIEW");
       const assignments = await client.query("SELECT * FROM research_sprint_task_assignments WHERE sprint_id = $1 FOR UPDATE", [req.params.sprintId]);
       const taskIds = assignments.rows.map((row) => row.task_id);
-      const tasksResult = await client.query("SELECT * FROM research_board_tasks WHERE id = ANY($1::text[]) FOR UPDATE", [taskIds]);
-      const state = await loadSprintReviewState({ projectId: req.params.id, sprintId: req.params.sprintId, executor: client });
+      const tasksResult = taskIds.length > 0
+        ? await client.query("SELECT * FROM research_board_tasks WHERE id = ANY($1::text[]) FOR UPDATE", [taskIds])
+        : { rows: [] };
+      const state = await loadSprintReviewState({ projectId: req.params.id, sprintId: req.params.sprintId, executor: client, evaluatorUserId: access.userId });
       if (!state.canFinalize) throw createHttpError("Sprint belum siap difinalisasi.", 409, "SCRUM_SPRINT_FINALIZATION_BLOCKED");
       const taskMap = new Map(tasksResult.rows.map((row) => [row.id, row]));
       const targetIds = [...new Set(assignments.rows.filter((row) => row.outcome === "carry_over").map((row) => row.target_sprint_id).filter(Boolean))];
@@ -3194,6 +3231,7 @@ router.post(
       }
       for (const assignment of assignments.rows) {
         const task = taskMap.get(assignment.task_id);
+        if (!task) continue;
         const isDone = String(task.status).toUpperCase() === "DONE";
         let outcome = assignment.outcome;
         if (isDone) outcome = "done";
@@ -3212,13 +3250,21 @@ router.post(
           await client.query("UPDATE research_board_tasks SET sprint_id = NULL, cancelled_at = NOW(), cancelled_by = $2, updated_at = NOW() WHERE id = $1", [assignment.task_id, access.userId || null]);
         }
       }
-      const finalizedSummary = await client.query(
+      let finalizedSummary = await client.query(
         `UPDATE research_sprint_summaries
          SET is_finalized = TRUE, finalized_by = $2, finalized_at = NOW(), updated_at = NOW()
          WHERE sprint_id = $1 AND is_finalized = FALSE RETURNING *`,
         [req.params.sprintId, access.userId || null]
       );
-      if (finalizedSummary.rowCount === 0) throw createHttpError("Summary Sprint belum tersedia atau sudah difinalisasi.", 409, "SCRUM_SUMMARY_FINALIZED");
+      if (finalizedSummary.rowCount === 0) {
+        finalizedSummary = await client.query(
+          `INSERT INTO research_sprint_summaries (id, sprint_id, summary, is_finalized, finalized_by, finalized_at, updated_at)
+           VALUES ($1, $2, $3, TRUE, $4, NOW(), NOW())
+           ON CONFLICT (sprint_id) DO UPDATE SET is_finalized = TRUE, finalized_by = EXCLUDED.finalized_by, finalized_at = NOW(), updated_at = NOW()
+           RETURNING *`,
+          [`SUMMARY-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`, req.params.sprintId, "Sprint selesai", access.userId || null]
+        );
+      }
       await client.query("UPDATE research_sprints SET status = 'closed', closed_at = NOW(), updated_at = NOW() WHERE id = $1", [req.params.sprintId]);
       await client.query("COMMIT");
       res.json({ message: "Sprint berhasil difinalisasi.", sprintId: req.params.sprintId, status: "closed", summary: mapSprintSummary(finalizedSummary.rows[0]) });
