@@ -91,6 +91,13 @@ async function autoMigrateDatabase(clientOrPool = pool, { log = console.log, sil
     // ignore
   }
 
+  try {
+    const { ensureEvaluationTables } = require("../utils/evaluationService");
+    await ensureEvaluationTables(clientOrPool);
+  } catch (err) {
+    // ignore
+  }
+
   if (!silent) log("[AutoMigrate] Database auto-generation complete.");
   return true;
 }

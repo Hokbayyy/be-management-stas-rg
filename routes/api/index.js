@@ -32,6 +32,7 @@ const picketRouter = require("./picket");
 const graduationSubmissionsRouter = require("./graduationSubmissions");
 const documentCenterRouter = require("./documentCenter");
 const reactivationsRouter = require("./reactivations");
+const evaluationsRouter = require("./evaluations");
 const { requireRoleStrict } = require("../../utils/roleGuard");
 
 const router = express.Router();
@@ -84,5 +85,6 @@ router.use("/picket", picketRouter);
 router.use("/graduation-submissions", requireRoleStrict(["mahasiswa", "operator", "admin", "dosen"]), graduationSubmissionsRouter);
 router.use("/reactivations", requireRoleStrict(["mahasiswa", "operator", "admin"]), reactivationsRouter);
 router.use("/document-center", documentCenterRouter);
+router.use("/evaluations", evaluationsRouter);
 
 module.exports = router;

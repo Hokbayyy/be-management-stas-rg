@@ -891,4 +891,149 @@ CREATE TABLE IF NOT EXISTS research_join_requests (
 CREATE INDEX IF NOT EXISTS idx_research_join_requests_project ON research_join_requests(project_id);
 CREATE INDEX IF NOT EXISTS idx_research_join_requests_student ON research_join_requests(student_id);
 
+CREATE TABLE IF NOT EXISTS evaluation_periods (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  type TEXT NOT NULL CHECK (type IN ('PM_EVALUATION', 'MONTHLY_PRESENTATION')),
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT', 'OPEN', 'CLOSED')),
+  start_date DATE NOT NULL,
+  end_date DATE NOT NULL,
+  description TEXT,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  opened_at TIMESTAMPTZ,
+  closed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_evaluation_periods_type_status ON evaluation_periods(type, status);
+CREATE INDEX IF NOT EXISTS idx_evaluation_periods_dates ON evaluation_periods(start_date DESC, end_date DESC);
+
+CREATE TABLE IF NOT EXISTS evaluation_criteria (
+  id TEXT PRIMARY KEY,
+  period_type TEXT NOT NULL CHECK (period_type IN ('PM_EVALUATION', 'MONTHLY_PRESENTATION')),
+  key TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  min_score NUMERIC(4, 2) NOT NULL DEFAULT 1.0,
+  max_score NUMERIC(4, 2) NOT NULL DEFAULT 10.0,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (period_type, key)
+);
+CREATE INDEX IF NOT EXISTS idx_evaluation_criteria_type_sort ON evaluation_criteria(period_type, sort_order ASC);
+
+CREATE TABLE IF NOT EXISTS evaluation_assignments (
+  id TEXT PRIMARY KEY,
+  period_id TEXT NOT NULL REFERENCES evaluation_periods(id) ON DELETE CASCADE,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  evaluator_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  division_id TEXT REFERENCES research_divisions(id) ON DELETE SET NULL,
+  division_name TEXT,
+  project_id TEXT REFERENCES research_projects(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'DRAFT', 'SUBMITTED')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (period_id, student_id, evaluator_id)
+);
+CREATE INDEX IF NOT EXISTS idx_evaluation_assignments_period ON evaluation_assignments(period_id);
+CREATE INDEX IF NOT EXISTS idx_evaluation_assignments_evaluator ON evaluation_assignments(evaluator_id);
+CREATE INDEX IF NOT EXISTS idx_evaluation_assignments_student ON evaluation_assignments(student_id);
+
+CREATE TABLE IF NOT EXISTS presentation_sessions (
+  id TEXT PRIMARY KEY,
+  period_id TEXT NOT NULL REFERENCES evaluation_periods(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  session_date DATE NOT NULL,
+  start_time TIME,
+  end_time TIME,
+  location TEXT,
+  notes TEXT,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_presentation_sessions_period ON presentation_sessions(period_id);
+CREATE INDEX IF NOT EXISTS idx_presentation_sessions_date ON presentation_sessions(session_date ASC);
+
+CREATE TABLE IF NOT EXISTS presentation_evaluators (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES presentation_sessions(id) ON DELETE CASCADE,
+  evaluator_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role TEXT,
+  is_present BOOLEAN NOT NULL DEFAULT TRUE,
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (session_id, evaluator_id)
+);
+CREATE INDEX IF NOT EXISTS idx_presentation_evaluators_session ON presentation_evaluators(session_id);
+CREATE INDEX IF NOT EXISTS idx_presentation_evaluators_evaluator ON presentation_evaluators(evaluator_id);
+
+CREATE TABLE IF NOT EXISTS presentation_slots (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES presentation_sessions(id) ON DELETE CASCADE,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  slot_order INTEGER NOT NULL DEFAULT 1,
+  start_time TIME,
+  end_time TIME,
+  status TEXT NOT NULL DEFAULT 'SCHEDULED'
+    CHECK (status IN ('SCHEDULED', 'PRESENTING', 'COMPLETED', 'ABSENT', 'RESCHEDULED')),
+  division_id TEXT REFERENCES research_divisions(id) ON DELETE SET NULL,
+  division_name TEXT,
+  project_id TEXT REFERENCES research_projects(id) ON DELETE SET NULL,
+  topic TEXT,
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (session_id, student_id)
+);
+CREATE INDEX IF NOT EXISTS idx_presentation_slots_session_order ON presentation_slots(session_id, slot_order ASC);
+CREATE INDEX IF NOT EXISTS idx_presentation_slots_student ON presentation_slots(student_id);
+
+CREATE TABLE IF NOT EXISTS evaluation_submissions (
+  id TEXT PRIMARY KEY,
+  period_id TEXT NOT NULL REFERENCES evaluation_periods(id) ON DELETE CASCADE,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  evaluator_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  assignment_id TEXT REFERENCES evaluation_assignments(id) ON DELETE CASCADE,
+  slot_id TEXT REFERENCES presentation_slots(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT', 'SUBMITTED')),
+  overall_score NUMERIC(4, 2),
+  strength TEXT,
+  improvement TEXT,
+  notes TEXT,
+  submitted_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT chk_eval_submission_target CHECK (
+    (assignment_id IS NOT NULL AND slot_id IS NULL) OR
+    (slot_id IS NOT NULL AND assignment_id IS NULL)
+  ),
+  CONSTRAINT uq_eval_submission_assignment UNIQUE (assignment_id),
+  CONSTRAINT uq_eval_submission_slot_evaluator UNIQUE (slot_id, evaluator_id)
+);
+CREATE INDEX IF NOT EXISTS idx_evaluation_submissions_period ON evaluation_submissions(period_id);
+CREATE INDEX IF NOT EXISTS idx_evaluation_submissions_student ON evaluation_submissions(student_id);
+CREATE INDEX IF NOT EXISTS idx_evaluation_submissions_evaluator ON evaluation_submissions(evaluator_id);
+
+CREATE TABLE IF NOT EXISTS evaluation_score_items (
+  id TEXT PRIMARY KEY,
+  submission_id TEXT NOT NULL REFERENCES evaluation_submissions(id) ON DELETE CASCADE,
+  criteria_id TEXT NOT NULL REFERENCES evaluation_criteria(id) ON DELETE CASCADE,
+  criteria_key TEXT NOT NULL,
+  score NUMERIC(4, 2) NOT NULL CHECK (score >= 1.0 AND score <= 10.0),
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (submission_id, criteria_id)
+);
+CREATE INDEX IF NOT EXISTS idx_evaluation_score_items_submission ON evaluation_score_items(submission_id);
+
+ALTER TABLE research_divisions
+  ADD COLUMN IF NOT EXISTS coordinator_id TEXT REFERENCES users(id) ON DELETE SET NULL;
+
+ALTER TABLE research_memberships
+  ADD COLUMN IF NOT EXISTS division_id TEXT REFERENCES research_divisions(id) ON DELETE SET NULL;
+
 COMMIT;
