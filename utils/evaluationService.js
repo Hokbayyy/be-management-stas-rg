@@ -1735,38 +1735,57 @@ async function closeEvaluationPeriod(id, closedBy = null, optionsOrExecutor = {}
   }
 }
 
-async function deleteEvaluationPeriod(id, options = {}, executor = query) {
+async function deleteEvaluationPeriod(id, options = {}, executor = pool) {
   await ensureEvaluationTables(executor);
-  const period = await getEvaluationPeriodById(id, executor);
-  if (!period) throw createHttpError("Periode evaluasi tidak ditemukan.", 404);
+  const client = typeof executor?.connect === "function" ? await executor.connect() : executor;
+  const ownsTransaction = typeof executor?.connect === "function";
 
-  // Check if there are submitted evaluations
-  const subRes = await runQuery(
-    executor,
-    `SELECT COUNT(*)::int AS count FROM evaluation_submissions WHERE period_id = $1 AND status = 'SUBMITTED'`,
-    [id]
-  );
-  const submittedCount = subRes.rows[0]?.count || 0;
+  try {
+    if (ownsTransaction) await client.query("BEGIN");
 
-  if (submittedCount > 0 && !options.force) {
-    throw createHttpError(
-      `Periode evaluasi memiliki ${submittedCount} nilai yang sudah disubmit. Gunakan konfirmasi force untuk menghapus secara permanen.`,
-      409
+    const period = await getEvaluationPeriodById(id, client);
+    if (!period) throw createHttpError("Periode evaluasi tidak ditemukan.", 404);
+
+    // Check if there are submitted evaluations
+    const subRes = await runQuery(
+      client,
+      `SELECT COUNT(*)::int AS count FROM evaluation_submissions WHERE period_id = $1 AND status = 'SUBMITTED'`,
+      [id]
     );
+    const submittedCount = subRes.rows[0]?.count || 0;
+
+    if (submittedCount > 0 && !options.force) {
+      throw createHttpError(
+        `Periode evaluasi memiliki ${submittedCount} nilai yang sudah disubmit. Gunakan konfirmasi force untuk menghapus secara permanen.`,
+        409
+      );
+    }
+
+    // Explicitly delete all child records to guarantee cascade integrity across any environment
+    await runQuery(client, `DELETE FROM evaluation_score_items WHERE submission_id IN (SELECT id FROM evaluation_submissions WHERE period_id = $1)`, [id]);
+    await runQuery(client, `DELETE FROM evaluation_submissions WHERE period_id = $1`, [id]);
+    await runQuery(client, `DELETE FROM presentation_evaluators WHERE session_id IN (SELECT id FROM presentation_sessions WHERE period_id = $1)`, [id]);
+    await runQuery(client, `DELETE FROM presentation_slots WHERE session_id IN (SELECT id FROM presentation_sessions WHERE period_id = $1)`, [id]);
+    await runQuery(client, `DELETE FROM presentation_sessions WHERE period_id = $1`, [id]);
+    await runQuery(client, `DELETE FROM evaluation_assignments WHERE period_id = $1`, [id]);
+    await runQuery(client, `DELETE FROM evaluation_period_evaluators WHERE period_id = $1`, [id]);
+    await runQuery(client, `DELETE FROM evaluation_periods WHERE id = $1`, [id]);
+
+    if (ownsTransaction) await client.query("COMMIT");
+
+    return { id, title: period.title, message: `Periode evaluasi "${period.title}" berhasil dihapus.` };
+  } catch (error) {
+    if (ownsTransaction) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (_) {}
+    }
+    throw error;
+  } finally {
+    if (ownsTransaction) client.release();
   }
-
-  // Explicitly delete all child records to guarantee cascade integrity across any environment
-  await runQuery(executor, `DELETE FROM evaluation_scores WHERE submission_id IN (SELECT id FROM evaluation_submissions WHERE period_id = $1)`, [id]);
-  await runQuery(executor, `DELETE FROM evaluation_submissions WHERE period_id = $1`, [id]);
-  await runQuery(executor, `DELETE FROM presentation_evaluators WHERE session_id IN (SELECT id FROM presentation_sessions WHERE period_id = $1)`, [id]);
-  await runQuery(executor, `DELETE FROM presentation_slots WHERE session_id IN (SELECT id FROM presentation_sessions WHERE period_id = $1)`, [id]);
-  await runQuery(executor, `DELETE FROM presentation_sessions WHERE period_id = $1`, [id]);
-  await runQuery(executor, `DELETE FROM evaluation_assignments WHERE period_id = $1`, [id]);
-  await runQuery(executor, `DELETE FROM evaluation_period_evaluators WHERE period_id = $1`, [id]);
-  await runQuery(executor, `DELETE FROM evaluation_periods WHERE id = $1`, [id]);
-
-  return { id, title: period.title, message: `Periode evaluasi "${period.title}" berhasil dihapus.` };
 }
+
 
 // =============================================================================
 // EVALUATION CRITERIA

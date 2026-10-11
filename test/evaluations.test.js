@@ -5,6 +5,7 @@ const {
   ensureEvaluationTables,
   calculateAverageScore,
   validateScoreRange,
+  deleteEvaluationPeriod,
   INITIAL_PM_CRITERIA,
   INITIAL_PRESENTATION_CRITERIA
 } = require("../utils/evaluationService");
@@ -1070,4 +1071,53 @@ test("Period Deletion: requires force if submissions exist, and cleanly removes 
   const resForce = simulateDeletePeriod("EVP-SUBMITTED-1", { force: true });
   assert.equal(resForce.id, "EVP-SUBMITTED-1");
   assert.equal(mockPeriodsDb.has("EVP-SUBMITTED-1"), false);
+});
+
+test("deleteEvaluationPeriod executes correct cascade queries against evaluation_score_items and child tables", async () => {
+  const executedQueries = [];
+  const mockClient = {
+    query: async (sql, params) => {
+      executedQueries.push({ sql: sql.trim(), params });
+      if (sql.includes("information_schema.tables")) {
+        return { rows: [{ exists: true }] };
+      }
+      if (sql.includes("SELECT ep.*")) {
+        return {
+          rows: [
+            {
+              id: "EVP-TEST-DEL",
+              title: "Test Period To Delete",
+              status: "OPEN",
+              type: "PM_EVALUATION",
+              start_date: "2026-10-01",
+              end_date: "2026-10-15"
+            }
+          ]
+        };
+      }
+      if (sql.includes("SELECT COUNT(*)::int AS count FROM evaluation_submissions")) {
+        return { rows: [{ count: 0 }] };
+      }
+      return { rows: [], rowCount: 1 };
+    }
+  };
+
+  const res = await deleteEvaluationPeriod("EVP-TEST-DEL", { force: false }, mockClient);
+  assert.equal(res.id, "EVP-TEST-DEL");
+  assert.match(res.message, /berhasil dihapus/);
+
+  // Verify evaluation_score_items is deleted, NOT non-existent evaluation_scores
+  const deleteScoreQuery = executedQueries.find((q) => q.sql.includes("DELETE FROM evaluation_score_items"));
+  assert.ok(deleteScoreQuery, "Must delete from evaluation_score_items");
+  const wrongScoreQuery = executedQueries.find((q) => q.sql.includes("DELETE FROM evaluation_scores"));
+  assert.equal(wrongScoreQuery, undefined, "Must NOT query non-existent relation evaluation_scores");
+
+  // Verify all child tables deleted in proper order
+  assert.ok(executedQueries.some((q) => q.sql.includes("DELETE FROM evaluation_submissions")));
+  assert.ok(executedQueries.some((q) => q.sql.includes("DELETE FROM presentation_evaluators")));
+  assert.ok(executedQueries.some((q) => q.sql.includes("DELETE FROM presentation_slots")));
+  assert.ok(executedQueries.some((q) => q.sql.includes("DELETE FROM presentation_sessions")));
+  assert.ok(executedQueries.some((q) => q.sql.includes("DELETE FROM evaluation_assignments")));
+  assert.ok(executedQueries.some((q) => q.sql.includes("DELETE FROM evaluation_period_evaluators")));
+  assert.ok(executedQueries.some((q) => q.sql.includes("DELETE FROM evaluation_periods")));
 });
