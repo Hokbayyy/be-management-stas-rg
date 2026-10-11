@@ -202,6 +202,16 @@ test("Final Integration Audit: End-to-End Evaluation Flows", async (t) => {
       assert.equal(assignments.length, 3, "Snapshot should create 3 assignments for 3 students");
     }
 
+    // Step 3b: Evaluators initialized with PENDING attendance
+    {
+      const evalListRes = await api("GET", `/periods/${pmPeriodId}/evaluators`, null, { id: ids.admin, role: "operator" });
+      assert.equal(evalListRes.status, 200);
+      assert.ok(evalListRes.body.evaluators.length >= 2, "Both PMs should be registered as period evaluators");
+      for (const ev of evalListRes.body.evaluators) {
+        assert.equal(ev.attendanceStatus, "PENDING", "Initial attendance must be PENDING");
+      }
+    }
+
     // Step 4: PM divisi A hanya melihat mahasiswa divisi A
     {
       const resA = await api("GET", `/pm/assignments?periodId=${pmPeriodId}`, null, { id: ids.pmA, role: "mahasiswa" });
@@ -215,6 +225,37 @@ test("Final Integration Audit: End-to-End Evaluation Flows", async (t) => {
       assert.equal(resB.status, 200);
       assert.equal(resB.body.assignments.length, 2, "PM B should see 2 students (Divisi Web)");
       pmB_Assignment = resB.body.assignments[0];
+    }
+
+    // Step 4b: Evaluator cannot submit while attendance is PENDING (HTTP 422)
+    {
+      const pendingTry = await api("PUT", `/pm/assignments/${pmA_Assignment.assignmentId}/submission`, {
+        status: "DRAFT",
+        scores: [{ criteriaKey: "quality_of_work", score: 8.0 }]
+      }, { id: ids.pmA, role: "mahasiswa" });
+      assert.equal(pendingTry.status, 422, "Draft must be rejected when PM attendance is PENDING");
+    }
+
+    // Step 4c: Admin confirms PM attendance (PM A -> PRESENT, PM B -> ABSENT)
+    {
+      const attResA = await api("PATCH", `/periods/${pmPeriodId}/evaluators/${ids.pmA}/attendance`, {
+        attendanceStatus: "PRESENT"
+      }, { id: ids.admin, role: "operator" });
+      assert.equal(attResA.status, 200);
+      assert.equal(attResA.body.evaluator.attendanceStatus, "PRESENT");
+
+      const attResB = await api("PATCH", `/periods/${pmPeriodId}/evaluators/${ids.pmB}/attendance`, {
+        attendanceStatus: "ABSENT"
+      }, { id: ids.admin, role: "operator" });
+      assert.equal(attResB.status, 200);
+      assert.equal(attResB.body.evaluator.attendanceStatus, "ABSENT");
+
+      // PM B (ABSENT) cannot draft or submit
+      const absentTry = await api("PUT", `/pm/assignments/${pmB_Assignment.assignmentId}/submission`, {
+        status: "DRAFT",
+        scores: [{ criteriaKey: "quality_of_work", score: 8.0 }]
+      }, { id: ids.pmB, role: "mahasiswa" });
+      assert.equal(absentTry.status, 422, "Draft must be rejected when PM attendance is ABSENT");
     }
 
     // Step 5: PM A tidak dapat menilai mahasiswa divisi B (HTTP 403)
@@ -609,6 +650,170 @@ test("Final Integration Audit: End-to-End Evaluation Flows", async (t) => {
     {
       const res = await api("GET", `/periods/${pmPeriodId}/recap`, null, { id: ids.mhs1, role: "mahasiswa" });
       assert.equal(res.status, 403, "Student accessing global recap must return 403");
+    }
+
+    // -------------------------------------------------------------------------
+    // 5. CROSS-PROJECT SOFTWARE GROUP, MULTI-PM & RECAP INTEGRATION FLOW
+    // -------------------------------------------------------------------------
+    let novPeriodId;
+    {
+      // 1. Create November PM_EVALUATION period
+      const createRes = await api("POST", "/periods", {
+        title: "Evaluasi PM Bulanan November",
+        type: "PM_EVALUATION",
+        startDate: "2026-11-01",
+        endDate: "2026-11-30",
+        description: "Periode evaluasi PM bulanan November"
+      }, { id: ids.admin, role: "operator" });
+      assert.equal(createRes.status, 201);
+      novPeriodId = createRes.body.period.id;
+      createdPeriodIds.push(novPeriodId);
+
+      // 2. Configure Software Evaluation Group: assign PM A and PM B
+      const addPmARes = await api("POST", "/groups/EVAL-GRP-SOFTWARE/evaluators", {
+        evaluatorId: ids.pmA
+      }, { id: ids.admin, role: "operator" });
+      assert.ok([200, 201].includes(addPmARes.status));
+
+      const addPmBRes = await api("POST", "/groups/EVAL-GRP-SOFTWARE/evaluators", {
+        evaluatorId: ids.pmB
+      }, { id: ids.admin, role: "operator" });
+      assert.ok([200, 201].includes(addPmBRes.status));
+
+      // 3. Map students to Software group (manual mapping for student 2 and 3)
+      await api("POST", "/groups/EVAL-GRP-SOFTWARE/students", {
+        studentId: ids.std2,
+        notes: "Frontend Developer"
+      }, { id: ids.admin, role: "operator" });
+
+      await api("POST", "/groups/EVAL-GRP-SOFTWARE/students", {
+        studentId: ids.std3,
+        notes: "Backend Developer"
+      }, { id: ids.admin, role: "operator" });
+
+      // 4. Preview assignments before opening
+      const previewRes = await api("GET", `/periods/${novPeriodId}/preview-assignments`, null, {
+        id: ids.admin,
+        role: "operator"
+      });
+      assert.equal(previewRes.status, 200);
+      assert.ok(previewRes.body.uniqueStudents >= 2, "Preview should contain at least 2 unique students");
+      assert.ok(previewRes.body.totalAssignments >= 4, "Preview should contain at least 4 assignments (2 students x 2 PMs)");
+
+      // 5. Open November period
+      const openRes = await api("POST", `/periods/${novPeriodId}/open`, {}, {
+        id: ids.admin,
+        role: "operator"
+      });
+      assert.equal(openRes.status, 200);
+      assert.equal(openRes.body.period.status, "OPEN");
+
+      // 6. Idempotent backfill / sync
+      const syncRes = await api("POST", `/periods/${novPeriodId}/sync-assignments`, {}, {
+        id: ids.admin,
+        role: "operator"
+      });
+      assert.equal(syncRes.status, 200);
+      assert.equal(syncRes.body.syncedCount, 0, "Second sync must add 0 assignments (idempotent)");
+
+      // 7. Admin confirms attendance: PM A -> PRESENT, PM B -> PRESENT
+      await api("PATCH", `/periods/${novPeriodId}/evaluators/${ids.pmA}/attendance`, {
+        attendanceStatus: "PRESENT"
+      }, { id: ids.admin, role: "operator" });
+
+      await api("PATCH", `/periods/${novPeriodId}/evaluators/${ids.pmB}/attendance`, {
+        attendanceStatus: "PRESENT"
+      }, { id: ids.admin, role: "operator" });
+
+      // 8. Fetch assignments for PM A and PM B
+      const pmAAsnRes = await api("GET", `/pm/assignments?periodId=${novPeriodId}`, null, {
+        id: ids.pmA,
+        role: "mahasiswa"
+      });
+      assert.equal(pmAAsnRes.status, 200);
+      const pmAStudent2Asn = pmAAsnRes.body.assignments.find((a) => a.studentId === ids.std2);
+      assert.ok(pmAStudent2Asn, "PM A should have an assignment for Student 2");
+
+      const pmBAsnRes = await api("GET", `/pm/assignments?periodId=${novPeriodId}`, null, {
+        id: ids.pmB,
+        role: "mahasiswa"
+      });
+      assert.equal(pmBAsnRes.status, 200);
+      const pmBStudent2Asn = pmBAsnRes.body.assignments.find((a) => a.studentId === ids.std2);
+      assert.ok(pmBStudent2Asn, "PM B should have an assignment for Student 2");
+
+      // 9. PM A submits 8.0 for Student 2
+      const scoresA = [
+        { criteriaKey: "quality_of_work", score: 8.0 },
+        { criteriaKey: "responsibility", score: 8.0 },
+        { criteriaKey: "technical_skill", score: 8.0 },
+        { criteriaKey: "problem_solving", score: 8.0 },
+        { criteriaKey: "collaboration", score: 8.0 },
+        { criteriaKey: "initiative", score: 8.0 },
+        { criteriaKey: "research_contribution", score: 8.0 }
+      ];
+      await api("PUT", `/pm/assignments/${pmAStudent2Asn.assignmentId}/submission`, {
+        status: "SUBMITTED",
+        scores: scoresA,
+        strength: "Solid code quality"
+      }, { id: ids.pmA, role: "mahasiswa" });
+
+      // Check recap: Student 2 status should be PROVISIONAL with provisionalScore 8.0
+      const midRecapRes = await api("GET", `/periods/${novPeriodId}/recap`, null, {
+        id: ids.admin,
+        role: "operator"
+      });
+      assert.equal(midRecapRes.status, 200);
+      const std2Mid = midRecapRes.body.items.find((i) => i.studentId === ids.std2);
+      assert.ok(std2Mid);
+      assert.equal(std2Mid.status, "PROVISIONAL");
+      assert.equal(std2Mid.finalScore, null, "Final score must be null while PM B has not submitted yet");
+      assert.equal(Number(std2Mid.provisionalScore), 8.0);
+
+      // 10. PM B submits 9.0 for Student 2
+      const scoresB = [
+        { criteriaKey: "quality_of_work", score: 9.0 },
+        { criteriaKey: "responsibility", score: 9.0 },
+        { criteriaKey: "technical_skill", score: 9.0 },
+        { criteriaKey: "problem_solving", score: 9.0 },
+        { criteriaKey: "collaboration", score: 9.0 },
+        { criteriaKey: "initiative", score: 9.0 },
+        { criteriaKey: "research_contribution", score: 9.0 }
+      ];
+      await api("PUT", `/pm/assignments/${pmBStudent2Asn.assignmentId}/submission`, {
+        status: "SUBMITTED",
+        scores: scoresB,
+        strength: "Great initiative"
+      }, { id: ids.pmB, role: "mahasiswa" });
+
+      // Check recap: Student 2 status should now be FINAL with score (8.0 + 9.0) / 2 = 8.50!
+      const finalRecapRes = await api("GET", `/periods/${novPeriodId}/recap`, null, {
+        id: ids.admin,
+        role: "operator"
+      });
+      assert.equal(finalRecapRes.status, 200);
+      const std2Final = finalRecapRes.body.items.find((i) => i.studentId === ids.std2);
+      assert.ok(std2Final);
+      assert.equal(std2Final.status, "FINAL");
+      assert.equal(Number(std2Final.finalScore), 8.5);
+
+      // 11. Close November period (using force: true since student 3 was not scored)
+      const closeNovRes = await api("POST", `/periods/${novPeriodId}/close`, {
+        force: true
+      }, { id: ids.admin, role: "operator" });
+      assert.equal(closeNovRes.status, 200);
+      assert.equal(closeNovRes.body.period.status, "CLOSED");
+
+      // 12. Student 2 views their history: finalScore is visible as 8.5
+      const mhs2History = await api("GET", "/my-history", null, {
+        id: ids.mhs2,
+        role: "mahasiswa"
+      });
+      assert.equal(mhs2History.status, 200);
+      const novEval = mhs2History.body.pmEvaluations.find((e) => e.periodId === novPeriodId);
+      assert.ok(novEval);
+      assert.equal(novEval.resultAvailable, true);
+      assert.equal(Number(novEval.overallScore), 8.5);
     }
 
   } finally {

@@ -34,7 +34,25 @@ const {
   getEvaluationPeriodProgress,
   getEvaluationPeriodRecap,
   getStudentEvaluationHistory,
-  checkUserIsPm
+  checkUserIsPm,
+  listEvaluationGroups,
+  getEvaluationGroupById,
+  createEvaluationGroup,
+  updateEvaluationGroup,
+  addEvaluationGroupRole,
+  removeEvaluationGroupRole,
+  addEvaluationGroupStudent,
+  removeEvaluationGroupStudent,
+  getEligibleGroupStudents,
+  listGroupEvaluators,
+  addGroupEvaluator,
+  removeGroupEvaluator,
+  listPeriodEvaluators,
+  addPeriodEvaluator,
+  updatePeriodEvaluatorAttendance,
+  removePeriodEvaluator,
+  previewPeriodAssignments,
+  syncPeriodAssignments
 } = require("../../utils/evaluationService");
 const { resolveStudentId, resolveStudentRecord } = require("../../utils/studentResolver");
 
@@ -145,8 +163,74 @@ router.post(
     if (!requireAdmin(req, res)) return;
     const id = requireSafeId(req.params.id, "id");
     const { userId } = getRequester(req);
-    const period = await closeEvaluationPeriod(id, userId);
+    const period = await closeEvaluationPeriod(id, userId, req.body);
     res.json({ message: "Periode evaluasi berhasil ditutup.", period });
+  })
+);
+
+router.get(
+  "/periods/:id/preview-assignments",
+  asyncHandler(async (req, res) => {
+    if (!requireStaff(req, res)) return;
+    const id = requireSafeId(req.params.id, "id");
+    const preview = await previewPeriodAssignments(id);
+    res.json(preview);
+  })
+);
+
+router.post(
+  "/periods/:id/sync-assignments",
+  asyncHandler(async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = requireSafeId(req.params.id, "id");
+    const { userId } = getRequester(req);
+    const result = await syncPeriodAssignments(id, userId);
+    res.json(result);
+  })
+);
+
+router.get(
+  "/periods/:id/evaluators",
+  asyncHandler(async (req, res) => {
+    if (!requireAuth(req, res)) return;
+    const id = requireSafeId(req.params.id, "id");
+    const evaluators = await listPeriodEvaluators(id);
+    res.json({ evaluators });
+  })
+);
+
+router.post(
+  "/periods/:id/evaluators",
+  asyncHandler(async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = requireSafeId(req.params.id, "id");
+    const { evaluatorId, groupId } = req.body;
+    if (!evaluatorId) return res.status(400).json({ message: "evaluatorId wajib diisi." });
+    const evaluator = await addPeriodEvaluator(id, evaluatorId, groupId || null);
+    res.status(201).json({ message: "Evaluator periode berhasil ditambahkan.", evaluator });
+  })
+);
+
+const handleUpdatePeriodEvaluatorAttendance = asyncHandler(async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const id = requireSafeId(req.params.id, "id");
+  const evaluatorId = requireSafeId(req.params.evaluatorId, "evaluatorId");
+  const { userId } = getRequester(req);
+  const evaluator = await updatePeriodEvaluatorAttendance(id, evaluatorId, req.body, userId);
+  res.json({ message: "Kehadiran evaluator periode berhasil diperbarui.", evaluator });
+});
+
+router.patch("/periods/:id/evaluators/:evaluatorId/attendance", handleUpdatePeriodEvaluatorAttendance);
+router.put("/periods/:id/evaluators/:evaluatorId/attendance", handleUpdatePeriodEvaluatorAttendance);
+
+router.delete(
+  "/periods/:id/evaluators/:evaluatorId",
+  asyncHandler(async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = requireSafeId(req.params.id, "id");
+    const evaluatorId = requireSafeId(req.params.evaluatorId, "evaluatorId");
+    const result = await removePeriodEvaluator(id, evaluatorId);
+    res.json(result);
   })
 );
 
@@ -193,6 +277,138 @@ router.get(
 );
 
 // =============================================================================
+// EVALUATION GROUPS & ROLE/STUDENT MAPPINGS
+// =============================================================================
+
+router.get(
+  "/groups",
+  asyncHandler(async (req, res) => {
+    if (!requireAuth(req, res)) return;
+    const { isActive } = req.query;
+    const groups = await listEvaluationGroups({ isActive: isActive !== undefined ? isActive === "true" : null });
+    res.json({ groups });
+  })
+);
+
+router.post(
+  "/groups",
+  asyncHandler(async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const group = await createEvaluationGroup(req.body);
+    res.status(201).json({ message: "Kelompok evaluasi berhasil dibuat.", group });
+  })
+);
+
+router.get(
+  "/groups/:groupId",
+  asyncHandler(async (req, res) => {
+    if (!requireAuth(req, res)) return;
+    const groupId = requireSafeId(req.params.groupId, "groupId");
+    const group = await getEvaluationGroupById(groupId);
+    if (!group) return res.status(404).json({ message: "Kelompok evaluasi tidak ditemukan." });
+    res.json({ group });
+  })
+);
+
+const handleUpdateGroup = asyncHandler(async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const groupId = requireSafeId(req.params.groupId, "groupId");
+  const group = await updateEvaluationGroup(groupId, req.body);
+  res.json({ message: "Kelompok evaluasi berhasil diperbarui.", group });
+});
+
+router.patch("/groups/:groupId", handleUpdateGroup);
+router.put("/groups/:groupId", handleUpdateGroup);
+
+router.post(
+  "/groups/:groupId/roles",
+  asyncHandler(async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const groupId = requireSafeId(req.params.groupId, "groupId");
+    const { rolePattern } = req.body;
+    if (!rolePattern) return res.status(400).json({ message: "rolePattern wajib diisi." });
+    const mapping = await addEvaluationGroupRole(groupId, rolePattern);
+    res.status(201).json({ message: "Mapping role berhasil ditambahkan.", mapping });
+  })
+);
+
+router.delete(
+  "/groups/:groupId/roles/:mappingId",
+  asyncHandler(async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const mappingId = requireSafeId(req.params.mappingId, "mappingId");
+    const result = await removeEvaluationGroupRole(mappingId);
+    res.json(result);
+  })
+);
+
+router.post(
+  "/groups/:groupId/students",
+  asyncHandler(async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const groupId = requireSafeId(req.params.groupId, "groupId");
+    const { studentId, notes } = req.body;
+    if (!studentId) return res.status(400).json({ message: "studentId wajib diisi." });
+    const mapping = await addEvaluationGroupStudent(groupId, studentId, notes);
+    res.status(201).json({ message: "Mahasiswa berhasil ditambahkan ke kelompok.", mapping });
+  })
+);
+
+router.delete(
+  "/groups/:groupId/students/:studentId",
+  asyncHandler(async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const groupId = requireSafeId(req.params.groupId, "groupId");
+    const studentId = requireSafeId(req.params.studentId, "studentId");
+    const result = await removeEvaluationGroupStudent(groupId, studentId);
+    res.json(result);
+  })
+);
+
+router.get(
+  "/groups/:groupId/eligible-students",
+  asyncHandler(async (req, res) => {
+    if (!requireStaff(req, res)) return;
+    const groupId = requireSafeId(req.params.groupId, "groupId");
+    const eligibleStudents = await getEligibleGroupStudents(groupId);
+    res.json({ students: eligibleStudents, eligibleStudents, count: eligibleStudents.length });
+  })
+);
+
+router.get(
+  "/groups/:groupId/evaluators",
+  asyncHandler(async (req, res) => {
+    if (!requireAuth(req, res)) return;
+    const groupId = requireSafeId(req.params.groupId, "groupId");
+    const evaluators = await listGroupEvaluators(groupId);
+    res.json({ evaluators });
+  })
+);
+
+router.post(
+  "/groups/:groupId/evaluators",
+  asyncHandler(async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const groupId = requireSafeId(req.params.groupId, "groupId");
+    const { evaluatorId } = req.body;
+    if (!evaluatorId) return res.status(400).json({ message: "evaluatorId wajib diisi." });
+    const evaluator = await addGroupEvaluator(groupId, evaluatorId);
+    res.status(201).json({ message: "Evaluator berhasil ditambahkan ke kelompok.", evaluator });
+  })
+);
+
+router.delete(
+  "/groups/:groupId/evaluators/:evaluatorId",
+  asyncHandler(async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const groupId = requireSafeId(req.params.groupId, "groupId");
+    const evaluatorId = requireSafeId(req.params.evaluatorId, "evaluatorId");
+    const result = await removeGroupEvaluator(groupId, evaluatorId);
+    res.json(result);
+  })
+);
+
+// =============================================================================
 // PM EVALUATION ASSIGNMENTS
 // =============================================================================
 
@@ -201,7 +417,7 @@ router.get(
   asyncHandler(async (req, res) => {
     if (!requireAuth(req, res)) return;
     const { isOperator, userId } = getRequester(req);
-    const { periodId, divisionId, status } = req.query;
+    const { periodId, groupId, divisionId, status } = req.query;
     if (!periodId) return res.status(400).json({ message: "periodId wajib diisi." });
 
     if (!isOperator) {
@@ -217,6 +433,7 @@ router.get(
     const assignments = await listPmAssignments({
       periodId: String(periodId),
       evaluatorId,
+      groupId: groupId || null,
       divisionId: divisionId || null,
       status: status || null
     });

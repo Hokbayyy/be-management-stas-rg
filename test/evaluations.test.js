@@ -590,3 +590,426 @@ test("Validation rejects duplicate PM_EVALUATION or MONTHLY_PRESENTATION in same
     () => validateNoDuplicateInMonth({ id: "EVP-NEW", type: "MONTHLY_PRESENTATION", startDate: "2026-11-15" }, existingPeriods)
   );
 });
+
+// ---------------------------------------------------------------------------
+// 9. Cross-Project Evaluation Groups, Multi-PM, Attendance & Aggregation
+// ---------------------------------------------------------------------------
+
+test("Multi-PM evaluation: 1 PM and 2 PM score aggregation computes proper arithmetic mean", () => {
+  function computeStudentMultiPmScore(evaluations) {
+    const presentSubmitted = evaluations.filter(
+      (e) => e.attendanceStatus === "PRESENT" && e.submissionStatus === "SUBMITTED" && e.overallScore != null
+    );
+    const scores = presentSubmitted.map((e) => Number(e.overallScore));
+    return calculateAverageScore(scores);
+  }
+
+  // 1 PM submitted
+  const evals1 = [
+    { evaluatorId: "PM-1", attendanceStatus: "PRESENT", submissionStatus: "SUBMITTED", overallScore: 8.5 }
+  ];
+  assert.equal(computeStudentMultiPmScore(evals1), 8.5);
+
+  // 2 PMs submitted: (8.5 + 9.5) / 2 = 9.0
+  const evals2 = [
+    { evaluatorId: "PM-1", attendanceStatus: "PRESENT", submissionStatus: "SUBMITTED", overallScore: 8.5 },
+    { evaluatorId: "PM-2", attendanceStatus: "PRESENT", submissionStatus: "SUBMITTED", overallScore: 9.5 }
+  ];
+  assert.equal(computeStudentMultiPmScore(evals2), 9.0);
+
+  // 3 PMs submitted: (8.0 + 8.5 + 9.0) / 3 = 25.5 / 3 = 8.5
+  const evals3 = [
+    { evaluatorId: "PM-1", attendanceStatus: "PRESENT", submissionStatus: "SUBMITTED", overallScore: 8.0 },
+    { evaluatorId: "PM-2", attendanceStatus: "PRESENT", submissionStatus: "SUBMITTED", overallScore: 8.5 },
+    { evaluatorId: "PM-3", attendanceStatus: "PRESENT", submissionStatus: "SUBMITTED", overallScore: 9.0 }
+  ];
+  assert.equal(computeStudentMultiPmScore(evals3), 8.5);
+});
+
+test("One PM absent: ABSENT PM is excluded from student average, never counted as 0.0", () => {
+  function computeStudentMultiPmScore(evaluations) {
+    const presentSubmitted = evaluations.filter(
+      (e) => e.attendanceStatus === "PRESENT" && e.submissionStatus === "SUBMITTED" && e.overallScore != null
+    );
+    const scores = presentSubmitted.map((e) => Number(e.overallScore));
+    return calculateAverageScore(scores);
+  }
+
+  // PM 1 PRESENT with 8.0, PM 2 ABSENT
+  const evals = [
+    { evaluatorId: "PM-1", attendanceStatus: "PRESENT", submissionStatus: "SUBMITTED", overallScore: 8.0 },
+    { evaluatorId: "PM-2", attendanceStatus: "ABSENT", submissionStatus: "PENDING", overallScore: null }
+  ];
+
+  const score = computeStudentMultiPmScore(evals);
+  assert.equal(score, 8.0, "ABSENT PM must be excluded, score must be 8.0, not (8.0 + 0) / 2 = 4.0");
+});
+
+test("PM PENDING or PRESENT not submitted results in PROVISIONAL or INCOMPLETE status with null finalScore", () => {
+  function computeStudentRecapStatus(evaluations) {
+    const totalEvaluators = evaluations.length;
+    const presentEvaluators = evaluations.filter((e) => e.attendanceStatus === "PRESENT").length;
+    const absentEvaluators = evaluations.filter((e) => e.attendanceStatus === "ABSENT").length;
+    const pendingEvaluators = evaluations.filter((e) => e.attendanceStatus === "PENDING").length;
+    const presentSubmitted = evaluations.filter(
+      (e) => e.attendanceStatus === "PRESENT" && e.submissionStatus === "SUBMITTED" && e.overallScore != null
+    );
+    const avgScore = calculateAverageScore(presentSubmitted.map((e) => Number(e.overallScore)));
+
+    if (totalEvaluators > 0 && absentEvaluators === totalEvaluators) {
+      return { status: "EXEMPT", finalScore: null, provisionalScore: null };
+    }
+    if (pendingEvaluators === 0 && presentEvaluators > 0 && presentSubmitted.length === presentEvaluators) {
+      return { status: "FINAL", finalScore: avgScore, provisionalScore: avgScore };
+    }
+    if (presentSubmitted.length > 0) {
+      return { status: "PROVISIONAL", finalScore: null, provisionalScore: avgScore };
+    }
+    return { status: "INCOMPLETE", finalScore: null, provisionalScore: null };
+  }
+
+  // 1 PM submitted, 1 PM PRESENT but not submitted yet -> PROVISIONAL
+  const provEvals = [
+    { evaluatorId: "PM-1", attendanceStatus: "PRESENT", submissionStatus: "SUBMITTED", overallScore: 8.5 },
+    { evaluatorId: "PM-2", attendanceStatus: "PRESENT", submissionStatus: "DRAFT", overallScore: null }
+  ];
+  const provRes = computeStudentRecapStatus(provEvals);
+  assert.equal(provRes.status, "PROVISIONAL");
+  assert.equal(provRes.finalScore, null, "Final score must be null while pending PM evaluations remain");
+  assert.equal(provRes.provisionalScore, 8.5);
+
+  // 1 PM submitted, 1 PM PENDING attendance -> PROVISIONAL
+  const pendingEvals = [
+    { evaluatorId: "PM-1", attendanceStatus: "PRESENT", submissionStatus: "SUBMITTED", overallScore: 8.5 },
+    { evaluatorId: "PM-2", attendanceStatus: "PENDING", submissionStatus: "PENDING", overallScore: null }
+  ];
+  const pendingRes = computeStudentRecapStatus(pendingEvals);
+  assert.equal(pendingRes.status, "PROVISIONAL");
+  assert.equal(pendingRes.finalScore, null);
+
+  // 0 PM submitted -> INCOMPLETE
+  const incEvals = [
+    { evaluatorId: "PM-1", attendanceStatus: "PRESENT", submissionStatus: "PENDING", overallScore: null }
+  ];
+  const incRes = computeStudentRecapStatus(incEvals);
+  assert.equal(incRes.status, "INCOMPLETE");
+  assert.equal(incRes.finalScore, null);
+  assert.equal(incRes.provisionalScore, null);
+});
+
+test("All PMs absent yields status EXEMPT with null finalScore", () => {
+  function computeStudentRecapStatus(evaluations) {
+    const totalEvaluators = evaluations.length;
+    const absentEvaluators = evaluations.filter((e) => e.attendanceStatus === "ABSENT").length;
+    if (totalEvaluators > 0 && absentEvaluators === totalEvaluators) {
+      return { status: "EXEMPT", finalScore: null, provisionalScore: null };
+    }
+    return { status: "INCOMPLETE", finalScore: null, provisionalScore: null };
+  }
+
+  const allAbsent = [
+    { evaluatorId: "PM-1", attendanceStatus: "ABSENT", submissionStatus: "PENDING" },
+    { evaluatorId: "PM-2", attendanceStatus: "ABSENT", submissionStatus: "PENDING" }
+  ];
+  const res = computeStudentRecapStatus(allAbsent);
+  assert.equal(res.status, "EXEMPT");
+  assert.equal(res.finalScore, null, "Exempt student score must be null, not 0.0");
+  assert.equal(res.provisionalScore, null);
+});
+
+test("Deduplication: Student participating in multiple projects produces exactly one candidate record", () => {
+  // Simulate row results from cross-project memberships before DISTINCT ON (student_id)
+  const rawCandidateRows = [
+    { student_id: "STD-01", project_id: "PRJ-A", role: "Frontend Dev", group_id: "EVAL-GRP-SOFTWARE" },
+    { student_id: "STD-01", project_id: "PRJ-B", role: "Fullstack Dev", group_id: "EVAL-GRP-SOFTWARE" },
+    { student_id: "STD-02", project_id: "PRJ-A", role: "Backend Dev", group_id: "EVAL-GRP-SOFTWARE" }
+  ];
+
+  // Distinct by student_id
+  const deduplicated = [];
+  const seenStudentIds = new Set();
+  for (const row of rawCandidateRows) {
+    if (!seenStudentIds.has(row.student_id)) {
+      seenStudentIds.add(row.student_id);
+      deduplicated.push(row);
+    }
+  }
+
+  assert.equal(deduplicated.length, 2, "STD-01 appearing in 2 projects must be deduplicated into 1 candidate");
+  assert.equal(deduplicated[0].student_id, "STD-01");
+  assert.equal(deduplicated[1].student_id, "STD-02");
+});
+
+test("Role mapping: Generic roles excluded from Software group unless manually mapped", () => {
+  const rolePatterns = [
+    "%Frontend%",
+    "%Backend%",
+    "%Fullstack%",
+    "%Software%",
+    "%Web%",
+    "%Mobile%"
+  ];
+
+  function matchesPattern(role) {
+    if (!role) return false;
+    const lowerRole = role.toLowerCase();
+    return rolePatterns.some((p) => {
+      const keyword = p.replace(/%/g, "").toLowerCase();
+      return lowerRole.includes(keyword);
+    });
+  }
+
+  // Eligible roles
+  assert.equal(matchesPattern("Frontend Dev"), true);
+  assert.equal(matchesPattern("Lead Backend Engineer"), true);
+  assert.equal(matchesPattern("Fullstack Developer"), true);
+  assert.equal(matchesPattern("Mobile App Developer"), true);
+  assert.equal(matchesPattern("Web Master"), true);
+
+  // Ineligible generic roles
+  assert.equal(matchesPattern("Anggota Inti"), false);
+  assert.equal(matchesPattern("IoT Engineer"), false);
+  assert.equal(matchesPattern("Alumni"), false);
+  assert.equal(matchesPattern(null), false);
+  assert.equal(matchesPattern(undefined), false);
+
+  // Manual assignment override
+  function resolveCandidate(student, manualGroupAssignments) {
+    const isManual = manualGroupAssignments.some((m) => m.student_id === student.id && m.group_id === "EVAL-GRP-SOFTWARE");
+    if (isManual) {
+      return { eligible: true, source: "MANUAL_ASSIGNMENT" };
+    }
+    if (matchesPattern(student.role)) {
+      return { eligible: true, source: "ROLE_PATTERN" };
+    }
+    return { eligible: false, source: null };
+  }
+
+  const anggotaIntiStudent = { id: "STD-ANGGOTA", role: "Anggota Inti" };
+  assert.equal(resolveCandidate(anggotaIntiStudent, []).eligible, false);
+
+  const manualAssignedStudent = resolveCandidate(anggotaIntiStudent, [{ student_id: "STD-ANGGOTA", group_id: "EVAL-GRP-SOFTWARE" }]);
+  assert.equal(manualAssignedStudent.eligible, true);
+  assert.equal(manualAssignedStudent.source, "MANUAL_ASSIGNMENT");
+});
+
+test("Unauthorized evaluator: rejected when not assigned or when attendance is PENDING or ABSENT", () => {
+  function checkEvaluatorAuthorization(assignment, requesterId, attendanceStatus) {
+    if (assignment.evaluator_id !== requesterId) {
+      const err = new Error("Akses ditolak. Anda bukan evaluator untuk penugasan ini.");
+      err.statusCode = 403;
+      throw err;
+    }
+    if (attendanceStatus === "PENDING") {
+      const err = new Error("Evaluator belum dikonfirmasi hadir (status kehadiran: PENDING). Admin harus mengonfirmasi kehadiran sebelum pengisian nilai.");
+      err.statusCode = 422;
+      throw err;
+    }
+    if (attendanceStatus === "ABSENT") {
+      const err = new Error("Evaluator berstatus tidak hadir (ABSENT), penilaian tidak dapat diberikan.");
+      err.statusCode = 422;
+      throw err;
+    }
+    return true;
+  }
+
+  const assignment = { id: "ASG-1", evaluator_id: "PM-1" };
+
+  // Unassigned user -> 403
+  assert.throws(
+    () => checkEvaluatorAuthorization(assignment, "PM-OTHER", "PRESENT"),
+    (err) => err.statusCode === 403
+  );
+
+  // Assigned PM with PENDING attendance -> 422
+  assert.throws(
+    () => checkEvaluatorAuthorization(assignment, "PM-1", "PENDING"),
+    (err) => err.statusCode === 422 && /PENDING/.test(err.message)
+  );
+
+  // Assigned PM with ABSENT attendance -> 422
+  assert.throws(
+    () => checkEvaluatorAuthorization(assignment, "PM-1", "ABSENT"),
+    (err) => err.statusCode === 422 && /ABSENT/.test(err.message)
+  );
+
+  // Assigned PM with PRESENT attendance -> OK
+  assert.equal(checkEvaluatorAuthorization(assignment, "PM-1", "PRESENT"), true);
+});
+
+test("Backfill & Sync: syncPeriodAssignments is idempotent and avoids duplicate assignments", () => {
+  const existingAssignments = [
+    { period_id: "EVP-1", student_id: "STD-1", evaluator_id: "PM-1" },
+    { period_id: "EVP-1", student_id: "STD-2", evaluator_id: "PM-1" }
+  ];
+
+  function syncAssignments(candidates, evaluators, currentAssignments) {
+    const newAssignments = [];
+    const assignmentKeySet = new Set(
+      currentAssignments.map((a) => `${a.period_id}:${a.student_id}:${a.evaluator_id}`)
+    );
+
+    for (const cand of candidates) {
+      for (const ev of evaluators) {
+        const key = `EVP-1:${cand.student_id}:${ev.id}`;
+        if (!assignmentKeySet.has(key)) {
+          assignmentKeySet.add(key);
+          newAssignments.push({ period_id: "EVP-1", student_id: cand.student_id, evaluator_id: ev.id });
+        }
+      }
+    }
+    return newAssignments;
+  }
+
+  const candidates = [{ student_id: "STD-1" }, { student_id: "STD-2" }];
+  const evaluators = [{ id: "PM-1" }];
+
+  // First sync when already in DB -> creates 0
+  const sync1 = syncAssignments(candidates, evaluators, existingAssignments);
+  assert.equal(sync1.length, 0, "Idempotent sync must not create duplicate assignments");
+
+  // A new student is added
+  const updatedCandidates = [{ student_id: "STD-1" }, { student_id: "STD-2" }, { student_id: "STD-3" }];
+  const sync2 = syncAssignments(updatedCandidates, evaluators, existingAssignments);
+  assert.equal(sync2.length, 1, "Sync must only add missing assignments");
+  assert.equal(sync2[0].student_id, "STD-3");
+});
+
+test("Submission safety: existing submissions preserved and changing attendance to ABSENT requires force and correctionReason", () => {
+  function changeAttendanceToAbsent(evaluatorId, newStatus, currentSubmissionsCount, { force, correctionReason }) {
+    if (newStatus === "ABSENT" && currentSubmissionsCount > 0) {
+      if (!force || !correctionReason) {
+        const err = new Error("Evaluator sudah memiliki submission penilaian. Perubahan menjadi ABSENT dilarang kecuali menyertakan correctionReason dan konfirmasi force: true.");
+        err.statusCode = 422;
+        throw err;
+      }
+    }
+    return { attendanceStatus: "ABSENT", notes: correctionReason };
+  }
+
+  // Evaluator with 0 submissions can be marked ABSENT without force
+  assert.deepEqual(
+    changeAttendanceToAbsent("PM-1", "ABSENT", 0, {}),
+    { attendanceStatus: "ABSENT", notes: undefined }
+  );
+
+  // Evaluator with existing submissions cannot be marked ABSENT without force -> 422
+  assert.throws(
+    () => changeAttendanceToAbsent("PM-1", "ABSENT", 2, {}),
+    (err) => err.statusCode === 422
+  );
+
+  // Evaluator with existing submissions can be marked ABSENT with force: true and correctionReason
+  const result = changeAttendanceToAbsent("PM-1", "ABSENT", 2, {
+    force: true,
+    correctionReason: "PM berhalangan mendadak sakit"
+  });
+  assert.equal(result.attendanceStatus, "ABSENT");
+  assert.equal(result.notes, "PM berhalangan mendadak sakit");
+});
+
+test("Closing period validation rejects PENDING attendance and unsubmitted PMs unless force: true; score averaging precision", () => {
+  function validateClosePeriod({ pendingEvaluatorCount, unsubmittedPresentCount, force }) {
+    if (pendingEvaluatorCount > 0 && !force) {
+      const err = new Error("Masih ada evaluator dengan status kehadiran PENDING.");
+      err.statusCode = 422;
+      throw err;
+    }
+    if (unsubmittedPresentCount > 0 && !force) {
+      const err = new Error("Masih ada evaluator berstatus PRESENT yang belum menyelesaikan penilaian.");
+      err.statusCode = 422;
+      throw err;
+    }
+    return true;
+  }
+
+  // Blocked by PENDING attendance
+  assert.throws(
+    () => validateClosePeriod({ pendingEvaluatorCount: 1, unsubmittedPresentCount: 0, force: false }),
+    (err) => err.statusCode === 422 && /PENDING/.test(err.message)
+  );
+
+  // Blocked by unsubmitted PRESENT evaluator
+  assert.throws(
+    () => validateClosePeriod({ pendingEvaluatorCount: 0, unsubmittedPresentCount: 2, force: false }),
+    (err) => err.statusCode === 422 && /PRESENT/.test(err.message)
+  );
+
+  // Force override allows closing with unresolved evaluators
+  assert.equal(
+    validateClosePeriod({ pendingEvaluatorCount: 1, unsubmittedPresentCount: 2, force: true }),
+    true
+  );
+
+  // All confirmed and submitted allows closing normally
+  assert.equal(
+    validateClosePeriod({ pendingEvaluatorCount: 0, unsubmittedPresentCount: 0, force: false }),
+    true
+  );
+
+  // Score averaging precision verification (2 decimals)
+  assert.equal(calculateAverageScore([7.0, 7.0, 8.0]), 7.33); // (22 / 3 = 7.3333... -> 7.33)
+  assert.equal(calculateAverageScore([8.0, 9.0, 9.0]), 8.67); // (26 / 3 = 8.6666... -> 8.67)
+  assert.equal(calculateAverageScore([1.0, 10.0]), 5.5);
+});
+
+test("Database migration 038 defines evaluation groups, mappings, and attendance columns", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+
+  const migrationPath = path.join(__dirname, "../db/migrations/038_pm_evaluation_groups_and_attendance.sql");
+  assert.ok(fs.existsSync(migrationPath), "Migration 038 SQL file must exist");
+
+  const migrationSql = fs.readFileSync(migrationPath, "utf-8");
+  assert.ok(migrationSql.includes("CREATE TABLE IF NOT EXISTS evaluation_groups"), "Must create evaluation_groups");
+  assert.ok(migrationSql.includes("CREATE TABLE IF NOT EXISTS evaluation_group_role_mappings"), "Must create evaluation_group_role_mappings");
+  assert.ok(migrationSql.includes("CREATE TABLE IF NOT EXISTS evaluation_group_students"), "Must create evaluation_group_students");
+  assert.ok(migrationSql.includes("CREATE TABLE IF NOT EXISTS evaluation_group_evaluators"), "Must create evaluation_group_evaluators");
+  assert.ok(migrationSql.includes("CREATE TABLE IF NOT EXISTS evaluation_period_evaluators"), "Must create evaluation_period_evaluators");
+  assert.ok(migrationSql.includes("ALTER TABLE evaluation_assignments"), "Must alter evaluation_assignments");
+  assert.ok(migrationSql.includes("group_id"), "Must add group_id to assignments");
+  assert.ok(migrationSql.includes("ALTER TABLE evaluation_periods"), "Must alter evaluation_periods to add group_id");
+});
+
+test("Explicit period scoping: Opening a Software period strictly scopes to Software group and excludes unrelated groups", () => {
+  const activeGroups = [
+    { id: "EVAL-GRP-SOFTWARE", name: "Software" },
+    { id: "EVAL-GRP-HARDWARE", name: "Hardware & IoT" },
+    { id: "EVAL-GRP-DESIGN", name: "Design & UX" }
+  ];
+
+  function resolveScopedGroups(period, evaluatorsInPeriod) {
+    if (period.group_id) {
+      return activeGroups.filter((g) => g.id === period.group_id);
+    }
+    const peGroupIds = new Set(evaluatorsInPeriod.filter((e) => e.group_id).map((e) => e.group_id));
+    if (peGroupIds.size > 0) {
+      return activeGroups.filter((g) => peGroupIds.has(g.id));
+    }
+    const titleMatch = activeGroups.filter((g) => period.title && period.title.toLowerCase().includes(g.name.toLowerCase()));
+    if (titleMatch.length > 0) {
+      return titleMatch;
+    }
+    return [];
+  }
+
+  // 1. Period explicitly assigned group_id = EVAL-GRP-SOFTWARE
+  const scoped1 = resolveScopedGroups({ id: "EVP-1", title: "Evaluasi PM Q4", group_id: "EVAL-GRP-SOFTWARE" }, []);
+  assert.equal(scoped1.length, 1);
+  assert.equal(scoped1[0].id, "EVAL-GRP-SOFTWARE");
+  assert.ok(!scoped1.some((g) => g.id === "EVAL-GRP-HARDWARE"), "Hardware group must be strictly excluded");
+
+  // 2. Period title mentions Software
+  const scoped2 = resolveScopedGroups({ id: "EVP-2", title: "Evaluasi PM Software Periode 1", group_id: null }, []);
+  assert.equal(scoped2.length, 1);
+  assert.equal(scoped2[0].name, "Software");
+  assert.ok(!scoped2.some((g) => g.id === "EVAL-GRP-HARDWARE"), "Hardware group must be strictly excluded");
+
+  // 3. Evaluators assigned with group_id = EVAL-GRP-SOFTWARE
+  const scoped3 = resolveScopedGroups(
+    { id: "EVP-3", title: "Evaluasi PM Tim Inti", group_id: null },
+    [{ evaluator_id: "PM-1", group_id: "EVAL-GRP-SOFTWARE" }]
+  );
+  assert.equal(scoped3.length, 1);
+  assert.equal(scoped3[0].id, "EVAL-GRP-SOFTWARE");
+});

@@ -92,6 +92,10 @@ function mapPeriodRow(row) {
     evaluation_month: evaluationMonth,
     periodType: type,
     period_type: type,
+    groupId: row.group_id || null,
+    group_id: row.group_id || null,
+    groupName: row.group_name || null,
+    group_name: row.group_name || null,
     createdBy: row.created_by,
     creatorName: row.creator_name || null,
     openedAt: row.opened_at || null,
@@ -111,9 +115,12 @@ function mapAssignmentRow(row) {
     studentName: row.student_name,
     evaluatorId: row.evaluator_id,
     evaluatorName: row.evaluator_name,
+    groupId: row.group_id || null,
+    groupName: row.group_name || null,
     divisionId: row.division_id || null,
-    divisionName: row.division_name || "Tanpa Divisi",
+    divisionName: row.division_name || row.group_name || "Tanpa Divisi",
     projectId: row.project_id || null,
+    attendanceStatus: row.attendance_status || null,
     submissionId: row.submission_id || null,
     submissionStatus: row.submission_status || row.status || "PENDING",
     overallScore: row.overall_score != null ? Number(row.overall_score) : null,
@@ -153,6 +160,41 @@ function mapSubmissionRow(row) {
   };
 }
 
+function mapPeriodEvaluatorRow(row) {
+  if (!row) return null;
+  return {
+    ...row,
+    id: row.id,
+    periodId: row.period_id,
+    period_id: row.period_id,
+    evaluatorId: row.evaluator_id,
+    evaluator_id: row.evaluator_id,
+    groupId: row.group_id || null,
+    group_id: row.group_id || null,
+    groupName: row.group_name || null,
+    group_name: row.group_name || null,
+    attendanceStatus: row.attendance_status,
+    attendance_status: row.attendance_status,
+    confirmedAt: row.confirmed_at || null,
+    confirmed_at: row.confirmed_at || null,
+    confirmedBy: row.confirmed_by || null,
+    confirmed_by: row.confirmed_by || null,
+    confirmedByName: row.confirmed_by_name || null,
+    confirmed_by_name: row.confirmed_by_name || null,
+    notes: row.notes || null,
+    evaluatorName: row.evaluator_name || null,
+    evaluator_name: row.evaluator_name || null,
+    email: row.email || null,
+    userRole: row.user_role || null,
+    totalAssignments: row.total_assignments != null ? Number(row.total_assignments) : 0,
+    submittedCount: row.submitted_count != null ? Number(row.submitted_count) : 0,
+    draftCount: row.draft_count != null ? Number(row.draft_count) : 0,
+    pendingCount: row.pending_count != null ? Number(row.pending_count) : 0,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
 async function checkUserIsPm(userId, periodId = null, executor = query) {
   if (!userId) return false;
   if (periodId) {
@@ -162,7 +204,30 @@ async function checkUserIsPm(userId, periodId = null, executor = query) {
       [periodId, userId]
     );
     if (res.rowCount > 0) return true;
+
+    try {
+      const peRes = await runQuery(
+        executor,
+        `SELECT 1 FROM evaluation_period_evaluators WHERE period_id = $1 AND evaluator_id = $2 LIMIT 1`,
+        [periodId, userId]
+      );
+      if (peRes.rowCount > 0) return true;
+    } catch (e) {
+      // table might not exist yet during migration
+    }
   }
+
+  try {
+    const grpRes = await runQuery(
+      executor,
+      `SELECT 1 FROM evaluation_group_evaluators WHERE evaluator_id = $1 AND is_active = TRUE LIMIT 1`,
+      [userId]
+    );
+    if (grpRes.rowCount > 0) return true;
+  } catch (e) {
+    // ignore
+  }
+
   const divRes = await runQuery(
     executor,
     `SELECT 1 FROM research_divisions WHERE coordinator_id = $1 AND is_active = TRUE LIMIT 1`,
@@ -261,6 +326,73 @@ async function ensureEvaluationTables(executor = query) {
       name = EXCLUDED.name,
       sort_order = EXCLUDED.sort_order;
 
+    CREATE TABLE IF NOT EXISTS evaluation_groups (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    INSERT INTO evaluation_groups (id, name, description, is_active)
+    VALUES ('EVAL-GRP-SOFTWARE', 'Software', 'Kelompok penilaian mahasiswa software engineering lintas proyek', TRUE)
+    ON CONFLICT (id) DO NOTHING;
+
+    CREATE TABLE IF NOT EXISTS evaluation_group_role_mappings (
+      id TEXT PRIMARY KEY,
+      group_id TEXT NOT NULL REFERENCES evaluation_groups(id) ON DELETE CASCADE,
+      role_pattern TEXT NOT NULL,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (group_id, role_pattern)
+    );
+
+    INSERT INTO evaluation_group_role_mappings (id, group_id, role_pattern, is_active)
+    VALUES
+      ('EVAL-MAP-FE', 'EVAL-GRP-SOFTWARE', '%Frontend%', TRUE),
+      ('EVAL-MAP-BE', 'EVAL-GRP-SOFTWARE', '%Backend%', TRUE),
+      ('EVAL-MAP-FS', 'EVAL-GRP-SOFTWARE', '%Fullstack%', TRUE),
+      ('EVAL-MAP-SW', 'EVAL-GRP-SOFTWARE', '%Software%', TRUE),
+      ('EVAL-MAP-WEB', 'EVAL-GRP-SOFTWARE', '%Web%', TRUE),
+      ('EVAL-MAP-MOB', 'EVAL-GRP-SOFTWARE', '%Mobile%', TRUE)
+    ON CONFLICT (group_id, role_pattern) DO NOTHING;
+
+    CREATE TABLE IF NOT EXISTS evaluation_group_students (
+      id TEXT PRIMARY KEY,
+      group_id TEXT NOT NULL REFERENCES evaluation_groups(id) ON DELETE CASCADE,
+      student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+      notes TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (group_id, student_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS evaluation_group_evaluators (
+      id TEXT PRIMARY KEY,
+      group_id TEXT NOT NULL REFERENCES evaluation_groups(id) ON DELETE CASCADE,
+      evaluator_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (group_id, evaluator_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS evaluation_period_evaluators (
+      id TEXT PRIMARY KEY,
+      period_id TEXT NOT NULL REFERENCES evaluation_periods(id) ON DELETE CASCADE,
+      evaluator_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      group_id TEXT REFERENCES evaluation_groups(id) ON DELETE SET NULL,
+      attendance_status TEXT NOT NULL DEFAULT 'PENDING' CHECK (attendance_status IN ('PENDING', 'PRESENT', 'ABSENT')),
+      confirmed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      confirmed_at TIMESTAMPTZ,
+      notes TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (period_id, evaluator_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_evaluation_period_evaluators_period ON evaluation_period_evaluators(period_id);
+    CREATE INDEX IF NOT EXISTS idx_evaluation_period_evaluators_evaluator ON evaluation_period_evaluators(evaluator_id);
+
     CREATE TABLE IF NOT EXISTS evaluation_assignments (
       id TEXT PRIMARY KEY,
       period_id TEXT NOT NULL REFERENCES evaluation_periods(id) ON DELETE CASCADE,
@@ -269,11 +401,17 @@ async function ensureEvaluationTables(executor = query) {
       division_id TEXT REFERENCES research_divisions(id) ON DELETE SET NULL,
       division_name TEXT,
       project_id TEXT REFERENCES research_projects(id) ON DELETE SET NULL,
+      group_id TEXT REFERENCES evaluation_groups(id) ON DELETE SET NULL,
+      group_name TEXT,
       status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'DRAFT', 'SUBMITTED')),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (period_id, student_id, evaluator_id)
     );
+
+    ALTER TABLE evaluation_assignments
+      ADD COLUMN IF NOT EXISTS group_id TEXT REFERENCES evaluation_groups(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS group_name TEXT;
 
     CREATE TABLE IF NOT EXISTS presentation_sessions (
       id TEXT PRIMARY KEY,
@@ -359,8 +497,906 @@ async function ensureEvaluationTables(executor = query) {
 
     ALTER TABLE research_memberships
       ADD COLUMN IF NOT EXISTS division_id TEXT REFERENCES research_divisions(id) ON DELETE SET NULL;
+
+    ALTER TABLE evaluation_periods
+      ADD COLUMN IF NOT EXISTS group_id TEXT REFERENCES evaluation_groups(id) ON DELETE SET NULL;
     `
   );
+}
+
+// =============================================================================
+// EVALUATION GROUPS & ROLE/STUDENT MAPPINGS
+// =============================================================================
+
+async function listEvaluationGroups({ isActive = null } = {}, executor = query) {
+  await ensureEvaluationTables(executor);
+  const params = [];
+  let where = "";
+  if (isActive !== null && isActive !== undefined) {
+    params.push(Boolean(isActive));
+    where = `WHERE eg.is_active = $1`;
+  }
+  const result = await runQuery(
+    executor,
+    `
+    SELECT eg.*,
+           (SELECT COUNT(*)::int FROM evaluation_group_role_mappings egrm WHERE egrm.group_id = eg.id AND egrm.is_active = TRUE) AS active_role_mappings_count,
+           (SELECT COUNT(*)::int FROM evaluation_group_students egs WHERE egs.group_id = eg.id) AS manual_students_count,
+           (SELECT COUNT(*)::int FROM evaluation_group_evaluators ege WHERE ege.group_id = eg.id AND ege.is_active = TRUE) AS evaluators_count
+    FROM evaluation_groups eg
+    ${where}
+    ORDER BY eg.name ASC
+    `,
+    params
+  );
+  return result.rows;
+}
+
+async function getEvaluationGroupById(groupId, executor = query) {
+  await ensureEvaluationTables(executor);
+  const groupRes = await runQuery(
+    executor,
+    `
+    SELECT eg.*,
+           (SELECT COUNT(*)::int FROM evaluation_group_role_mappings egrm WHERE egrm.group_id = eg.id AND egrm.is_active = TRUE) AS active_role_mappings_count,
+           (SELECT COUNT(*)::int FROM evaluation_group_students egs WHERE egs.group_id = eg.id) AS manual_students_count,
+           (SELECT COUNT(*)::int FROM evaluation_group_evaluators ege WHERE ege.group_id = eg.id AND ege.is_active = TRUE) AS evaluators_count
+    FROM evaluation_groups eg
+    WHERE eg.id = $1
+    LIMIT 1
+    `,
+    [groupId]
+  );
+  if (groupRes.rowCount === 0) return null;
+  const group = groupRes.rows[0];
+
+  const roleMappings = await runQuery(
+    executor,
+    `SELECT * FROM evaluation_group_role_mappings WHERE group_id = $1 ORDER BY created_at ASC`,
+    [groupId]
+  );
+  group.roleMappings = roleMappings.rows;
+
+  const manualStudents = await runQuery(
+    executor,
+    `
+    SELECT egs.*, s.nim, u.name AS student_name
+    FROM evaluation_group_students egs
+    JOIN students s ON s.id = egs.student_id
+    JOIN users u ON u.id = s.user_id
+    WHERE egs.group_id = $1
+    ORDER BY u.name ASC
+    `,
+    [groupId]
+  );
+  group.manualStudents = manualStudents.rows;
+
+  const evaluators = await runQuery(
+    executor,
+    `
+    SELECT ege.*, u.name AS evaluator_name, u.email, u.role AS user_role
+    FROM evaluation_group_evaluators ege
+    JOIN users u ON u.id = ege.evaluator_id
+    WHERE ege.group_id = $1
+    ORDER BY u.name ASC
+    `,
+    [groupId]
+  );
+  group.evaluators = evaluators.rows;
+
+  return group;
+}
+
+async function createEvaluationGroup(payload = {}, executor = query) {
+  await ensureEvaluationTables(executor);
+  const name = String(payload.name || "").trim();
+  if (!name) throw createHttpError("Nama kelompok evaluasi wajib diisi.", 400);
+  const description = payload.description ? String(payload.description).trim() : null;
+  const id = payload.id ? String(payload.id).trim() : buildId("EVAL-GRP");
+
+  const res = await runQuery(
+    executor,
+    `
+    INSERT INTO evaluation_groups (id, name, description, is_active)
+    VALUES ($1, $2, $3, TRUE)
+    RETURNING *
+    `,
+    [id, name, description]
+  );
+  return res.rows[0];
+}
+
+async function updateEvaluationGroup(groupId, payload = {}, executor = query) {
+  await ensureEvaluationTables(executor);
+  const group = await getEvaluationGroupById(groupId, executor);
+  if (!group) throw createHttpError("Kelompok evaluasi tidak ditemukan.", 404);
+
+  const name = payload.name !== undefined ? String(payload.name).trim() : group.name;
+  if (!name) throw createHttpError("Nama kelompok evaluasi tidak boleh kosong.", 400);
+  const description = payload.description !== undefined ? (payload.description ? String(payload.description).trim() : null) : group.description;
+  const isActive = payload.isActive !== undefined ? Boolean(payload.isActive) : (payload.is_active !== undefined ? Boolean(payload.is_active) : group.is_active);
+
+  const res = await runQuery(
+    executor,
+    `
+    UPDATE evaluation_groups
+    SET name = $2, description = $3, is_active = $4, updated_at = NOW()
+    WHERE id = $1
+    RETURNING *
+    `,
+    [groupId, name, description, isActive]
+  );
+  return res.rows[0];
+}
+
+async function addEvaluationGroupRole(groupId, rolePattern, executor = query) {
+  await ensureEvaluationTables(executor);
+  const pattern = String(rolePattern || "").trim();
+  if (!pattern) throw createHttpError("rolePattern wajib diisi.", 400);
+  const id = buildId("EVAL-MAP");
+  const res = await runQuery(
+    executor,
+    `
+    INSERT INTO evaluation_group_role_mappings (id, group_id, role_pattern, is_active)
+    VALUES ($1, $2, $3, TRUE)
+    ON CONFLICT (group_id, role_pattern) DO UPDATE SET is_active = TRUE
+    RETURNING *
+    `,
+    [id, groupId, pattern]
+  );
+  return res.rows[0];
+}
+
+async function removeEvaluationGroupRole(mappingId, executor = query) {
+  await ensureEvaluationTables(executor);
+  const res = await runQuery(executor, "DELETE FROM evaluation_group_role_mappings WHERE id = $1 RETURNING *", [mappingId]);
+  if (res.rowCount === 0) throw createHttpError("Mapping role tidak ditemukan.", 404);
+  return { id: mappingId, message: "Mapping role berhasil dihapus." };
+}
+
+async function addEvaluationGroupStudent(groupId, studentIdOrUserId, notes = null, executor = query) {
+  await ensureEvaluationTables(executor);
+  const resolvedStdId = await resolveStudentId(studentIdOrUserId);
+  if (!resolvedStdId) throw createHttpError("Mahasiswa tidak ditemukan.", 404);
+
+  const id = buildId("EVAL-GST");
+  const res = await runQuery(
+    executor,
+    `
+    INSERT INTO evaluation_group_students (id, group_id, student_id, notes)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (group_id, student_id) DO UPDATE SET notes = EXCLUDED.notes
+    RETURNING *
+    `,
+    [id, groupId, resolvedStdId, notes ? String(notes).trim() : null]
+  );
+  return res.rows[0];
+}
+
+async function removeEvaluationGroupStudent(groupId, studentIdOrUserId, executor = query) {
+  await ensureEvaluationTables(executor);
+  const resolvedStdId = await resolveStudentId(studentIdOrUserId);
+  if (!resolvedStdId) throw createHttpError("Mahasiswa tidak ditemukan.", 404);
+
+  const res = await runQuery(
+    executor,
+    "DELETE FROM evaluation_group_students WHERE group_id = $1 AND student_id = $2 RETURNING *",
+    [groupId, resolvedStdId]
+  );
+  if (res.rowCount === 0) throw createHttpError("Mahasiswa tidak terdaftar pada kelompok ini.", 404);
+  return { groupId, studentId: resolvedStdId, message: "Mahasiswa berhasil dihapus dari kelompok." };
+}
+
+async function listGroupEvaluators(groupId, executor = query) {
+  await ensureEvaluationTables(executor);
+  const res = await runQuery(
+    executor,
+    `
+    SELECT ege.*, u.name AS evaluator_name, u.email, u.role AS user_role
+    FROM evaluation_group_evaluators ege
+    JOIN users u ON u.id = ege.evaluator_id
+    WHERE ege.group_id = $1
+    ORDER BY u.name ASC
+    `,
+    [groupId]
+  );
+  return res.rows;
+}
+
+async function addGroupEvaluator(groupId, evaluatorId, executor = query) {
+  await ensureEvaluationTables(executor);
+  const evId = String(evaluatorId || "").trim();
+  if (!evId) throw createHttpError("evaluatorId wajib diisi.", 400);
+
+  const id = buildId("EVAL-GEV");
+  const res = await runQuery(
+    executor,
+    `
+    INSERT INTO evaluation_group_evaluators (id, group_id, evaluator_id, is_active)
+    VALUES ($1, $2, $3, TRUE)
+    ON CONFLICT (group_id, evaluator_id) DO UPDATE SET is_active = TRUE
+    RETURNING *
+    `,
+    [id, groupId, evId]
+  );
+  return res.rows[0];
+}
+
+async function removeGroupEvaluator(groupId, evaluatorId, executor = query) {
+  await ensureEvaluationTables(executor);
+  const res = await runQuery(
+    executor,
+    "DELETE FROM evaluation_group_evaluators WHERE group_id = $1 AND evaluator_id = $2 RETURNING *",
+    [groupId, evaluatorId]
+  );
+  if (res.rowCount === 0) throw createHttpError("Evaluator tidak ditemukan pada kelompok ini.", 404);
+  return { groupId, evaluatorId, message: "Evaluator berhasil dihapus dari kelompok." };
+}
+
+async function getEligibleGroupStudents(groupId = null, executor = query) {
+  await ensureEvaluationTables(executor);
+  const params = [];
+  let groupFilter = "";
+  if (groupId) {
+    params.push(groupId);
+    groupFilter = `WHERE eg.id = $1`;
+  } else {
+    groupFilter = `WHERE eg.is_active = TRUE`;
+  }
+
+  const queryText = `
+    WITH group_info AS (
+      SELECT eg.id AS group_id, eg.name AS group_name
+      FROM evaluation_groups eg
+      ${groupFilter}
+    ),
+    role_matched_candidates AS (
+      SELECT DISTINCT ON (s.id, gi.group_id)
+        s.id AS student_id,
+        s.user_id,
+        u.name AS student_name,
+        s.nim,
+        gi.group_id,
+        gi.group_name,
+        'ROLE_PATTERN' AS match_source,
+        rm.peran AS matched_role,
+        rm.project_id
+      FROM students s
+      JOIN users u ON u.id = s.user_id
+      JOIN research_memberships rm ON rm.user_id = u.id AND rm.member_type = 'Mahasiswa' AND rm.status = 'Aktif'
+      JOIN group_info gi ON TRUE
+      JOIN evaluation_group_role_mappings egrm ON egrm.group_id = gi.group_id AND egrm.is_active = TRUE
+      WHERE s.status = 'Aktif'
+        AND s.status NOT IN ('Alumni', 'Lulus', 'Mengundurkan Diri')
+        AND rm.peran IS NOT NULL
+        AND rm.peran ILIKE egrm.role_pattern
+      ORDER BY s.id, gi.group_id, rm.id ASC
+    ),
+    manual_candidates AS (
+      SELECT DISTINCT ON (s.id, gi.group_id)
+        s.id AS student_id,
+        s.user_id,
+        u.name AS student_name,
+        s.nim,
+        gi.group_id,
+        gi.group_name,
+        'MANUAL_ASSIGNMENT' AS match_source,
+        egs.notes AS matched_role,
+        (
+          SELECT rm.project_id
+          FROM research_memberships rm
+          WHERE rm.user_id = s.user_id AND rm.status = 'Aktif'
+          LIMIT 1
+        ) AS project_id
+      FROM students s
+      JOIN users u ON u.id = s.user_id
+      JOIN evaluation_group_students egs ON egs.student_id = s.id
+      JOIN group_info gi ON gi.group_id = egs.group_id
+      WHERE s.status = 'Aktif'
+        AND s.status NOT IN ('Alumni', 'Lulus', 'Mengundurkan Diri')
+        AND EXISTS (
+          SELECT 1 FROM research_memberships rm
+          WHERE rm.user_id = u.id AND rm.member_type = 'Mahasiswa' AND rm.status = 'Aktif'
+        )
+      ORDER BY s.id, gi.group_id ASC
+    ),
+    all_candidates AS (
+      SELECT * FROM manual_candidates
+      UNION
+      SELECT * FROM role_matched_candidates
+    )
+    SELECT DISTINCT ON (student_id)
+      student_id, user_id, student_name, nim, group_id, group_name, match_source, matched_role, project_id
+    FROM all_candidates
+    ORDER BY student_id, match_source DESC
+  `;
+
+  const res = await runQuery(executor, queryText, params);
+  return res.rows;
+}
+
+// =============================================================================
+// PERIOD EVALUATORS & ATTENDANCE
+// =============================================================================
+
+async function listPeriodEvaluators(periodId, executor = query) {
+  await ensureEvaluationTables(executor);
+  const res = await runQuery(
+    executor,
+    `
+    SELECT epe.*,
+           u.name AS evaluator_name, u.email, u.role AS user_role,
+           u_conf.name AS confirmed_by_name,
+           eg.name AS group_name,
+           (
+             SELECT COUNT(*)::int
+             FROM evaluation_assignments ea
+             WHERE ea.period_id = epe.period_id AND ea.evaluator_id = epe.evaluator_id
+           ) AS total_assignments,
+           (
+             SELECT COUNT(*)::int
+             FROM evaluation_assignments ea
+             WHERE ea.period_id = epe.period_id AND ea.evaluator_id = epe.evaluator_id AND ea.status = 'SUBMITTED'
+           ) AS submitted_count,
+           (
+             SELECT COUNT(*)::int
+             FROM evaluation_assignments ea
+             WHERE ea.period_id = epe.period_id AND ea.evaluator_id = epe.evaluator_id AND ea.status = 'DRAFT'
+           ) AS draft_count,
+           (
+             SELECT COUNT(*)::int
+             FROM evaluation_assignments ea
+             WHERE ea.period_id = epe.period_id AND ea.evaluator_id = epe.evaluator_id AND ea.status = 'PENDING'
+           ) AS pending_count
+    FROM evaluation_period_evaluators epe
+    JOIN users u ON u.id = epe.evaluator_id
+    LEFT JOIN users u_conf ON u_conf.id = epe.confirmed_by
+    LEFT JOIN evaluation_groups eg ON eg.id = epe.group_id
+    WHERE epe.period_id = $1
+    ORDER BY u.name ASC
+    `,
+    [periodId]
+  );
+  return res.rows.map(mapPeriodEvaluatorRow);
+}
+
+async function addPeriodEvaluator(periodId, evaluatorId, groupId = null, executor = query) {
+  await ensureEvaluationTables(executor);
+  const evId = String(evaluatorId || "").trim();
+  if (!evId) throw createHttpError("evaluatorId wajib diisi.", 400);
+
+  const id = buildId("EVA-PEV");
+  const res = await runQuery(
+    executor,
+    `
+    INSERT INTO evaluation_period_evaluators (id, period_id, evaluator_id, group_id, attendance_status)
+    VALUES ($1, $2, $3, $4, 'PENDING')
+    ON CONFLICT (period_id, evaluator_id) DO UPDATE SET group_id = COALESCE(EXCLUDED.group_id, evaluation_period_evaluators.group_id)
+    RETURNING *
+    `,
+    [id, periodId, evId, groupId || null]
+  );
+  return mapPeriodEvaluatorRow(res.rows[0]);
+}
+
+async function updatePeriodEvaluatorAttendance(periodId, evaluatorId, payload = {}, confirmedBy = null, executor = pool) {
+  await ensureEvaluationTables(executor);
+  const client = typeof executor.connect === "function" ? await executor.connect() : executor;
+  const ownsTransaction = typeof executor.connect === "function";
+
+  try {
+    if (ownsTransaction) await client.query("BEGIN");
+
+    const periodRes = await client.query("SELECT * FROM evaluation_periods WHERE id = $1 FOR UPDATE", [periodId]);
+    if (periodRes.rowCount === 0) throw createHttpError("Periode evaluasi tidak ditemukan.", 404);
+    const period = periodRes.rows[0];
+    if (period.status === "CLOSED") {
+      throw createHttpError("Periode evaluasi sudah ditutup dan tidak dapat diubah.", 409);
+    }
+
+    const attendanceStatus = String(payload.attendanceStatus || payload.attendance_status || "").trim().toUpperCase();
+    if (!["PENDING", "PRESENT", "ABSENT"].includes(attendanceStatus)) {
+      throw createHttpError("Status kehadiran harus salah satu dari: PENDING, PRESENT, ABSENT.", 400);
+    }
+
+    // Check existing period evaluator
+    const peRes = await client.query(
+      "SELECT * FROM evaluation_period_evaluators WHERE period_id = $1 AND evaluator_id = $2 FOR UPDATE",
+      [periodId, evaluatorId]
+    );
+    if (peRes.rowCount === 0) {
+      throw createHttpError("Evaluator tidak terdaftar pada periode ini.", 404);
+    }
+    const currentEvaluator = peRes.rows[0];
+
+    // If changing to ABSENT, check if evaluator already has draft or submitted evaluations
+    if (attendanceStatus === "ABSENT" && currentEvaluator.attendance_status !== "ABSENT") {
+      const subRes = await client.query(
+        `SELECT COUNT(*)::int AS count
+         FROM evaluation_submissions es
+         JOIN evaluation_assignments ea ON ea.id = es.assignment_id
+         WHERE ea.period_id = $1 AND ea.evaluator_id = $2 AND es.status IN ('DRAFT', 'SUBMITTED')`,
+        [periodId, evaluatorId]
+      );
+      const subCount = subRes.rows[0].count;
+      if (subCount > 0) {
+        const force = Boolean(payload.force || payload.correctionConfirmed);
+        const correctionReason = String(payload.correctionReason || payload.correction_reason || "").trim();
+        if (!force || !correctionReason) {
+          throw createHttpError(
+            "Evaluator sudah memiliki submission penilaian. Perubahan menjadi ABSENT dilarang kecuali menyertakan correctionReason dan konfirmasi force: true.",
+            422
+          );
+        }
+      }
+    }
+
+    const notes = payload.notes || payload.correctionReason || currentEvaluator.notes;
+    const updateRes = await client.query(
+      `UPDATE evaluation_period_evaluators
+       SET attendance_status = $3,
+           confirmed_by = $4,
+           confirmed_at = NOW(),
+           notes = $5,
+           updated_at = NOW()
+       WHERE period_id = $1 AND evaluator_id = $2
+       RETURNING *`,
+      [periodId, evaluatorId, attendanceStatus, confirmedBy, notes]
+    );
+
+    if (ownsTransaction) await client.query("COMMIT");
+    return mapPeriodEvaluatorRow(updateRes.rows[0]);
+  } catch (err) {
+    if (ownsTransaction) await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    if (ownsTransaction) client.release();
+  }
+}
+
+async function removePeriodEvaluator(periodId, evaluatorId, executor = pool) {
+  await ensureEvaluationTables(executor);
+  const client = typeof executor.connect === "function" ? await executor.connect() : executor;
+  const ownsTransaction = typeof executor.connect === "function";
+
+  try {
+    if (ownsTransaction) await client.query("BEGIN");
+
+    const periodRes = await client.query("SELECT * FROM evaluation_periods WHERE id = $1 FOR UPDATE", [periodId]);
+    if (periodRes.rowCount === 0) throw createHttpError("Periode evaluasi tidak ditemukan.", 404);
+    if (periodRes.rows[0].status === "CLOSED") {
+      throw createHttpError("Periode evaluasi sudah ditutup dan tidak dapat diubah.", 409);
+    }
+
+    const subRes = await client.query(
+      `SELECT COUNT(*)::int AS count
+       FROM evaluation_submissions es
+       JOIN evaluation_assignments ea ON ea.id = es.assignment_id
+       WHERE ea.period_id = $1 AND ea.evaluator_id = $2`,
+      [periodId, evaluatorId]
+    );
+    if (subRes.rows[0].count > 0) {
+      throw createHttpError("Evaluator sudah memiliki data penilaian dan tidak dapat dihapus dari periode.", 422);
+    }
+
+    await client.query("DELETE FROM evaluation_assignments WHERE period_id = $1 AND evaluator_id = $2", [periodId, evaluatorId]);
+    await client.query("DELETE FROM evaluation_period_evaluators WHERE period_id = $1 AND evaluator_id = $2", [periodId, evaluatorId]);
+
+    if (ownsTransaction) await client.query("COMMIT");
+    return { periodId, evaluatorId, message: "Evaluator berhasil dihapus dari periode." };
+  } catch (err) {
+    if (ownsTransaction) await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    if (ownsTransaction) client.release();
+  }
+}
+
+// =============================================================================
+// PREVIEW & SYNC ASSIGNMENTS
+// =============================================================================
+
+async function generatePmAssignmentsForPeriod(periodId, executor = pool) {
+  const periodRes = await runQuery(executor, "SELECT * FROM evaluation_periods WHERE id = $1", [periodId]);
+  if (periodRes.rowCount === 0) throw createHttpError("Periode evaluasi tidak ditemukan.", 404);
+  const period = periodRes.rows[0];
+
+  const activeGroups = (await runQuery(executor, "SELECT * FROM evaluation_groups WHERE is_active = TRUE ORDER BY name ASC")).rows;
+  let syncedCount = 0;
+
+  // Explicitly scope groups for this period
+  let scopedGroups = [];
+  if (period.group_id) {
+    scopedGroups = activeGroups.filter((g) => g.id === period.group_id);
+  } else {
+    const peGroups = await runQuery(
+      executor,
+      "SELECT DISTINCT group_id FROM evaluation_period_evaluators WHERE period_id = $1 AND group_id IS NOT NULL",
+      [periodId]
+    );
+    if (peGroups.rowCount > 0) {
+      const gIdSet = new Set(peGroups.rows.map((r) => r.group_id));
+      scopedGroups = activeGroups.filter((g) => gIdSet.has(g.id));
+    } else {
+      const titleMatch = activeGroups.filter((g) => period.title && period.title.toLowerCase().includes(g.name.toLowerCase()));
+      if (titleMatch.length > 0) {
+        scopedGroups = titleMatch;
+      } else {
+        const groupsWithEvals = [];
+        for (const g of activeGroups) {
+          const geCount = await runQuery(
+            executor,
+            "SELECT 1 FROM evaluation_group_evaluators WHERE group_id = $1 AND is_active = TRUE LIMIT 1",
+            [g.id]
+          );
+          if (geCount.rowCount > 0) {
+            groupsWithEvals.push(g);
+          }
+        }
+        if (groupsWithEvals.length > 0) {
+          scopedGroups = groupsWithEvals;
+        }
+      }
+    }
+  }
+
+  for (const group of scopedGroups) {
+    // 1. Get evaluators for this group in this period
+    let periodEvals = (await runQuery(
+      executor,
+      "SELECT epe.*, u.name AS evaluator_name FROM evaluation_period_evaluators epe JOIN users u ON u.id = epe.evaluator_id WHERE epe.period_id = $1 AND (epe.group_id = $2 OR epe.group_id IS NULL)",
+      [periodId, group.id]
+    )).rows;
+
+    if (periodEvals.length === 0) {
+      const groupEvals = (await runQuery(
+        executor,
+        "SELECT ege.*, u.name AS evaluator_name FROM evaluation_group_evaluators ege JOIN users u ON u.id = ege.evaluator_id WHERE ege.group_id = $1 AND ege.is_active = TRUE",
+        [group.id]
+      )).rows;
+
+      for (const ge of groupEvals) {
+        const peId = buildId("EVA-PEV");
+        await runQuery(
+          executor,
+          `INSERT INTO evaluation_period_evaluators (id, period_id, evaluator_id, group_id, attendance_status)
+           VALUES ($1, $2, $3, $4, 'PENDING')
+           ON CONFLICT (period_id, evaluator_id) DO NOTHING`,
+          [peId, periodId, ge.evaluator_id, group.id]
+        );
+      }
+
+      periodEvals = (await runQuery(
+        executor,
+        "SELECT epe.*, u.name AS evaluator_name FROM evaluation_period_evaluators epe JOIN users u ON u.id = epe.evaluator_id WHERE epe.period_id = $1 AND (epe.group_id = $2 OR epe.group_id IS NULL)",
+        [periodId, group.id]
+      )).rows;
+    }
+
+    if (periodEvals.length === 0) continue;
+
+    // 2. Get eligible students for group
+    const students = await getEligibleGroupStudents(group.id, executor);
+
+    // 3. For each student and each evaluator, create assignment
+    for (const student of students) {
+      for (const ev of periodEvals) {
+        const asnId = buildId("EVA-ASN");
+        const insRes = await runQuery(
+          executor,
+          `INSERT INTO evaluation_assignments (
+             id, period_id, student_id, evaluator_id, group_id, group_name, division_name, project_id, status
+           )
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'PENDING')
+           ON CONFLICT (period_id, student_id, evaluator_id) DO NOTHING
+           RETURNING id`,
+          [asnId, periodId, student.student_id, ev.evaluator_id, group.id, group.name, group.name, student.project_id || null]
+        );
+        if (insRes.rowCount > 0) syncedCount++;
+      }
+    }
+  }
+
+  // Additive support for legacy research division coordinators (only if no evaluation group was scoped)
+  if (scopedGroups.length === 0) {
+    const legacyCoordinators = await runQuery(
+      executor,
+      `
+      SELECT s.id AS student_id, s.user_id, u.name AS student_name, s.nim,
+             rm.project_id, rp.title AS project_title,
+             COALESCE(rm.division_id, rd.id) AS division_id,
+             rd.name AS division_name,
+             COALESCE(rd.coordinator_id, (
+               SELECT pm_m.user_id
+               FROM research_memberships pm_m
+               WHERE pm_m.project_id = rm.project_id
+                 AND (pm_m.peran ILIKE '%PM%' OR pm_m.peran ILIKE '%Project Manager%' OR pm_m.peran ILIKE '%Koordinator%')
+                 AND pm_m.status = 'Aktif'
+               LIMIT 1
+             )) AS coordinator_id
+      FROM students s
+      JOIN users u ON u.id = s.user_id
+      JOIN research_memberships rm ON rm.user_id = u.id AND rm.member_type = 'Mahasiswa' AND rm.status = 'Aktif'
+      JOIN research_projects rp ON rp.id = rm.project_id
+      LEFT JOIN research_divisions rd ON (
+        (rm.division_id IS NOT NULL AND rd.id = rm.division_id)
+        OR (rm.division_id IS NULL AND rd.project_id = rm.project_id AND rd.is_active = TRUE)
+      )
+      WHERE s.status = 'Aktif'
+        AND s.status NOT IN ('Alumni', 'Lulus', 'Mengundurkan Diri')
+      ORDER BY s.id, rd.sort_order ASC
+      `
+    );
+
+    const seenLegacy = new Set();
+    for (const row of legacyCoordinators.rows) {
+      if (!row.coordinator_id) continue;
+      const key = `${periodId}:${row.student_id}:${row.coordinator_id}`;
+      if (seenLegacy.has(key)) continue;
+      seenLegacy.add(key);
+
+      const peId = buildId("EVA-PEV");
+      await runQuery(
+        executor,
+        `INSERT INTO evaluation_period_evaluators (id, period_id, evaluator_id, attendance_status)
+         VALUES ($1, $2, $3, 'PENDING')
+         ON CONFLICT (period_id, evaluator_id) DO NOTHING`,
+        [peId, periodId, row.coordinator_id]
+      );
+
+      const asnId = buildId("EVA-ASN");
+      const insRes = await runQuery(
+        executor,
+        `INSERT INTO evaluation_assignments (
+           id, period_id, student_id, evaluator_id, division_id, division_name, project_id, status
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING')
+         ON CONFLICT (period_id, student_id, evaluator_id) DO NOTHING
+         RETURNING id`,
+        [asnId, periodId, row.student_id, row.coordinator_id, row.division_id || null, row.division_name || null, row.project_id || null]
+      );
+      if (insRes.rowCount > 0) syncedCount++;
+    }
+  }
+
+  const totalAssignmentsRes = await runQuery(
+    executor,
+    "SELECT COUNT(*)::int AS count, COUNT(DISTINCT student_id)::int AS unique_students FROM evaluation_assignments WHERE period_id = $1",
+    [periodId]
+  );
+
+  return {
+    syncedCount,
+    totalAssignments: totalAssignmentsRes.rows[0]?.count || 0,
+    uniqueStudents: totalAssignmentsRes.rows[0]?.unique_students || 0
+  };
+}
+
+async function previewPeriodAssignments(periodId, executor = query) {
+  await ensureEvaluationTables(executor);
+  const period = await getEvaluationPeriodById(periodId, executor);
+  if (!period) throw createHttpError("Periode evaluasi tidak ditemukan.", 404);
+
+  const activeGroups = (await runQuery(executor, "SELECT * FROM evaluation_groups WHERE is_active = TRUE ORDER BY name ASC")).rows;
+  const evaluatorsMap = new Map();
+  const studentsMap = new Map();
+  const previewAssignments = [];
+  const seenPair = new Set();
+
+  // Explicitly scope groups for this period
+  let scopedGroups = [];
+  if (period.group_id) {
+    scopedGroups = activeGroups.filter((g) => g.id === period.group_id);
+  } else {
+    const peGroups = await runQuery(
+      executor,
+      "SELECT DISTINCT group_id FROM evaluation_period_evaluators WHERE period_id = $1 AND group_id IS NOT NULL",
+      [periodId]
+    );
+    if (peGroups.rowCount > 0) {
+      const gIdSet = new Set(peGroups.rows.map((r) => r.group_id));
+      scopedGroups = activeGroups.filter((g) => gIdSet.has(g.id));
+    } else {
+      const titleMatch = activeGroups.filter((g) => period.title && period.title.toLowerCase().includes(g.name.toLowerCase()));
+      if (titleMatch.length > 0) {
+        scopedGroups = titleMatch;
+      } else {
+        const groupsWithEvals = [];
+        for (const g of activeGroups) {
+          const geCount = await runQuery(
+            executor,
+            "SELECT 1 FROM evaluation_group_evaluators WHERE group_id = $1 AND is_active = TRUE LIMIT 1",
+            [g.id]
+          );
+          if (geCount.rowCount > 0) {
+            groupsWithEvals.push(g);
+          }
+        }
+        if (groupsWithEvals.length > 0) {
+          scopedGroups = groupsWithEvals;
+        }
+      }
+    }
+  }
+
+  for (const group of scopedGroups) {
+    let periodEvals = (await runQuery(
+      executor,
+      "SELECT epe.evaluator_id, u.name AS evaluator_name, u.email, epe.attendance_status, epe.group_id FROM evaluation_period_evaluators epe JOIN users u ON u.id = epe.evaluator_id WHERE epe.period_id = $1 AND (epe.group_id = $2 OR epe.group_id IS NULL)",
+      [periodId, group.id]
+    )).rows;
+
+    if (periodEvals.length === 0) {
+      periodEvals = (await runQuery(
+        executor,
+        "SELECT ege.evaluator_id, u.name AS evaluator_name, u.email, 'PENDING' AS attendance_status, ege.group_id FROM evaluation_group_evaluators ege JOIN users u ON u.id = ege.evaluator_id WHERE ege.group_id = $1 AND ege.is_active = TRUE",
+        [group.id]
+      )).rows;
+    }
+
+    for (const ev of periodEvals) {
+      evaluatorsMap.set(ev.evaluator_id, {
+        evaluatorId: ev.evaluator_id,
+        evaluatorName: ev.evaluator_name,
+        email: ev.email,
+        attendanceStatus: ev.attendance_status,
+        groupId: group.id,
+        groupName: group.name
+      });
+    }
+
+    const students = await getEligibleGroupStudents(group.id, executor);
+    for (const st of students) {
+      studentsMap.set(st.student_id, {
+        studentId: st.student_id,
+        studentName: st.student_name,
+        nim: st.nim,
+        groupId: group.id,
+        groupName: group.name,
+        matchSource: st.match_source,
+        matchedRole: st.matched_role
+      });
+
+      for (const ev of periodEvals) {
+        const pairKey = `${st.student_id}:${ev.evaluator_id}`;
+        if (!seenPair.has(pairKey)) {
+          seenPair.add(pairKey);
+          previewAssignments.push({
+            studentId: st.student_id,
+            studentName: st.student_name,
+            nim: st.nim,
+            evaluatorId: ev.evaluator_id,
+            evaluatorName: ev.evaluator_name,
+            groupId: group.id,
+            groupName: group.name
+          });
+        }
+      }
+    }
+  }
+
+  // Additive preview for legacy division coordinators (only if no evaluation group was scoped)
+  if (scopedGroups.length === 0) {
+    const legacyCoordinators = await runQuery(
+      executor,
+      `
+      SELECT s.id AS student_id, s.user_id, u.name AS student_name, s.nim,
+             rm.project_id,
+             COALESCE(rm.division_id, rd.id) AS division_id,
+             rd.name AS division_name,
+             COALESCE(rd.coordinator_id, (
+               SELECT pm_m.user_id
+               FROM research_memberships pm_m
+               WHERE pm_m.project_id = rm.project_id
+                 AND (pm_m.peran ILIKE '%PM%' OR pm_m.peran ILIKE '%Project Manager%' OR pm_m.peran ILIKE '%Koordinator%')
+                 AND pm_m.status = 'Aktif'
+               LIMIT 1
+             )) AS coordinator_id,
+             u_coord.name AS coordinator_name
+      FROM students s
+      JOIN users u ON u.id = s.user_id
+      JOIN research_memberships rm ON rm.user_id = u.id AND rm.member_type = 'Mahasiswa' AND rm.status = 'Aktif'
+      JOIN research_projects rp ON rp.id = rm.project_id
+      LEFT JOIN research_divisions rd ON (
+        (rm.division_id IS NOT NULL AND rd.id = rm.division_id)
+        OR (rm.division_id IS NULL AND rd.project_id = rm.project_id AND rd.is_active = TRUE)
+      )
+      LEFT JOIN users u_coord ON u_coord.id = COALESCE(rd.coordinator_id, (
+        SELECT pm_m.user_id
+        FROM research_memberships pm_m
+        WHERE pm_m.project_id = rm.project_id
+          AND (pm_m.peran ILIKE '%PM%' OR pm_m.peran ILIKE '%Project Manager%' OR pm_m.peran ILIKE '%Koordinator%')
+          AND pm_m.status = 'Aktif'
+        LIMIT 1
+      ))
+      WHERE s.status = 'Aktif'
+        AND s.status NOT IN ('Alumni', 'Lulus', 'Mengundurkan Diri')
+      `
+    );
+
+    for (const row of legacyCoordinators.rows) {
+      if (!row.coordinator_id) continue;
+      const pairKey = `${row.student_id}:${row.coordinator_id}`;
+      if (!seenPair.has(pairKey)) {
+        seenPair.add(pairKey);
+        if (!evaluatorsMap.has(row.coordinator_id)) {
+          evaluatorsMap.set(row.coordinator_id, {
+            evaluatorId: row.coordinator_id,
+            evaluatorName: row.coordinator_name || "Coordinator",
+            email: null,
+            attendanceStatus: "PENDING",
+            groupId: null,
+            groupName: row.division_name || "Tanpa Divisi"
+          });
+        }
+        if (!studentsMap.has(row.student_id)) {
+          studentsMap.set(row.student_id, {
+            studentId: row.student_id,
+            studentName: row.student_name,
+            nim: row.nim,
+            groupId: null,
+            groupName: row.division_name || "Tanpa Divisi",
+            matchSource: "LEGACY_DIVISION",
+            matchedRole: null
+          });
+        }
+        previewAssignments.push({
+          studentId: row.student_id,
+          studentName: row.student_name,
+          nim: row.nim,
+          evaluatorId: row.coordinator_id,
+          evaluatorName: row.coordinator_name || "Coordinator",
+          groupId: null,
+          groupName: row.division_name || "Tanpa Divisi"
+        });
+      }
+    }
+  }
+
+  return {
+    periodId: period.id,
+    periodTitle: period.title,
+    periodType: period.type,
+    uniqueStudents: studentsMap.size,
+    totalAssignments: previewAssignments.length,
+    evaluators: Array.from(evaluatorsMap.values()),
+    students: Array.from(studentsMap.values()),
+    previewAssignments
+  };
+}
+
+async function syncPeriodAssignments(periodId, syncBy = null, executor = pool) {
+  await ensureEvaluationTables(executor);
+  const client = typeof executor.connect === "function" ? await executor.connect() : executor;
+  const ownsTransaction = typeof executor.connect === "function";
+
+  try {
+    if (ownsTransaction) await client.query("BEGIN");
+
+    const periodRes = await client.query("SELECT * FROM evaluation_periods WHERE id = $1 FOR UPDATE", [periodId]);
+    if (periodRes.rowCount === 0) throw createHttpError("Periode evaluasi tidak ditemukan.", 404);
+    const period = periodRes.rows[0];
+    if (period.status === "CLOSED") {
+      throw createHttpError("Periode evaluasi sudah ditutup dan tidak dapat disinkronisasi.", 409);
+    }
+
+    const syncResult = await generatePmAssignmentsForPeriod(periodId, client);
+
+    if (ownsTransaction) await client.query("COMMIT");
+
+    return {
+      periodId,
+      message: "Assignments berhasil disinkronisasi.",
+      syncedCount: syncResult.syncedCount,
+      totalAssignments: syncResult.totalAssignments,
+      uniqueStudents: syncResult.uniqueStudents
+    };
+  } catch (err) {
+    if (ownsTransaction) await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    if (ownsTransaction) client.release();
+  }
 }
 
 // =============================================================================
@@ -391,10 +1427,11 @@ async function listEvaluationPeriods({ type = null, status = null, limit = 50, o
   const result = await runQuery(
     executor,
     `
-    SELECT ep.*, u.name AS creator_name,
+    SELECT ep.*, eg.name AS group_name, u.name AS creator_name,
            (SELECT COUNT(*)::int FROM evaluation_assignments ea WHERE ea.period_id = ep.id) AS total_assignments,
            (SELECT COUNT(*)::int FROM presentation_sessions ps WHERE ps.period_id = ep.id) AS total_sessions
     FROM evaluation_periods ep
+    LEFT JOIN evaluation_groups eg ON eg.id = ep.group_id
     LEFT JOIN users u ON u.id = ep.created_by
     ${whereClause}
     ORDER BY ep.start_date DESC, ep.created_at DESC
@@ -411,10 +1448,11 @@ async function getEvaluationPeriodById(id, executor = query) {
   const result = await runQuery(
     executor,
     `
-    SELECT ep.*, u.name AS creator_name,
+    SELECT ep.*, eg.name AS group_name, u.name AS creator_name,
            (SELECT COUNT(*)::int FROM evaluation_assignments ea WHERE ea.period_id = ep.id) AS total_assignments,
            (SELECT COUNT(*)::int FROM presentation_sessions ps WHERE ps.period_id = ep.id) AS total_sessions
     FROM evaluation_periods ep
+    LEFT JOIN evaluation_groups eg ON eg.id = ep.group_id
     LEFT JOIN users u ON u.id = ep.created_by
     WHERE ep.id = $1
     LIMIT 1
@@ -465,15 +1503,29 @@ async function createEvaluationPeriod(payload = {}, createdBy = null, executor =
     );
   }
 
+  let groupId = payload.groupId || payload.group_id || null;
+  if (groupId) {
+    const gCheck = await runQuery(executor, "SELECT id FROM evaluation_groups WHERE id = $1", [groupId]);
+    if (gCheck.rowCount === 0) {
+      throw createHttpError("Kelompok evaluasi tidak ditemukan.", 404);
+    }
+  } else if (type === "PM_EVALUATION") {
+    const activeGroups = await runQuery(executor, "SELECT id, name FROM evaluation_groups WHERE is_active = TRUE");
+    const matched = activeGroups.rows.find((g) => title.toLowerCase().includes(g.name.toLowerCase()));
+    if (matched) {
+      groupId = matched.id;
+    }
+  }
+
   const id = buildId("EVP");
   const result = await runQuery(
     executor,
     `
-    INSERT INTO evaluation_periods (id, title, type, status, start_date, end_date, description, created_by)
-    VALUES ($1, $2, $3, 'DRAFT', $4::date, $5::date, $6, $7)
+    INSERT INTO evaluation_periods (id, title, type, status, start_date, end_date, description, created_by, group_id)
+    VALUES ($1, $2, $3, 'DRAFT', $4::date, $5::date, $6, $7, $8)
     RETURNING *
     `,
-    [id, title, type, startDate, endDate, description, createdBy]
+    [id, title, type, startDate, endDate, description, createdBy, groupId]
   );
 
   return mapPeriodRow(result.rows[0]);
@@ -520,15 +1572,23 @@ async function updateEvaluationPeriod(id, payload = {}, executor = query) {
     }
   }
 
+  const groupId = payload.groupId !== undefined ? (payload.groupId || null) : (payload.group_id !== undefined ? (payload.group_id || null) : period.group_id);
+  if (groupId && groupId !== period.group_id) {
+    const gCheck = await runQuery(executor, "SELECT id FROM evaluation_groups WHERE id = $1", [groupId]);
+    if (gCheck.rowCount === 0) {
+      throw createHttpError("Kelompok evaluasi tidak ditemukan.", 404);
+    }
+  }
+
   const result = await runQuery(
     executor,
     `
     UPDATE evaluation_periods
-    SET title = $2, description = $3, start_date = $4::date, end_date = $5::date, updated_at = NOW()
+    SET title = $2, description = $3, start_date = $4::date, end_date = $5::date, group_id = $6, updated_at = NOW()
     WHERE id = $1
     RETURNING *
     `,
-    [id, title, description, startDate, endDate]
+    [id, title, description, startDate, endDate, groupId]
   );
 
   return mapPeriodRow(result.rows[0]);
@@ -559,61 +1619,16 @@ async function openEvaluationPeriod(id, openedBy = null, executor = pool) {
 
     // Snapshot target students if period is PM_EVALUATION
     if (period.type === "PM_EVALUATION" || period.type === "PM_BIWEEKLY") {
-      // Find active students enrolled in research projects and divisions with their designated coordinator
-      const targetStudents = await client.query(
-        `
-        SELECT s.id AS student_id, s.user_id, u.name AS student_name, s.nim,
-               rm.project_id, rp.title AS project_title,
-               COALESCE(rm.division_id, rd.id) AS division_id,
-               rd.name AS division_name,
-               COALESCE(rd.coordinator_id, (
-                 SELECT pm_m.user_id
-                 FROM research_memberships pm_m
-                 WHERE pm_m.project_id = rm.project_id
-                   AND (pm_m.peran ILIKE '%PM%' OR pm_m.peran ILIKE '%Project Manager%' OR pm_m.peran ILIKE '%Koordinator%')
-                   AND pm_m.status = 'Aktif'
-                 LIMIT 1
-               )) AS coordinator_id
-        FROM students s
-        JOIN users u ON u.id = s.user_id
-        JOIN research_memberships rm ON rm.user_id = u.id AND rm.member_type = 'Mahasiswa' AND rm.status = 'Aktif'
-        JOIN research_projects rp ON rp.id = rm.project_id
-        LEFT JOIN research_divisions rd ON (
-          (rm.division_id IS NOT NULL AND rd.id = rm.division_id)
-          OR (rm.division_id IS NULL AND rd.project_id = rm.project_id AND rd.is_active = TRUE)
-        )
-        WHERE s.status = 'Aktif'
-          AND s.status NOT IN ('Alumni', 'Lulus', 'Mengundurkan Diri')
-        ORDER BY s.id, rd.sort_order ASC
-        `
+      await generatePmAssignmentsForPeriod(period.id, client);
+
+      const asnCheck = await client.query(
+        "SELECT COUNT(*)::int AS count FROM evaluation_assignments WHERE period_id = $1",
+        [period.id]
       );
-
-      // Create snapshot assignments for students who have an assigned coordinator
-      const seen = new Set();
-      for (const row of targetStudents.rows) {
-        if (!row.coordinator_id) continue;
-        const key = `${period.id}:${row.student_id}:${row.coordinator_id}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-
-        const assignmentId = buildId("EVA-ASN");
-        await client.query(
-          `
-          INSERT INTO evaluation_assignments (
-            id, period_id, student_id, evaluator_id, division_id, division_name, project_id, status
-          )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, 'PENDING')
-          ON CONFLICT (period_id, student_id, evaluator_id) DO NOTHING
-          `,
-          [
-            assignmentId,
-            period.id,
-            row.student_id,
-            row.coordinator_id,
-            row.division_id || null,
-            row.division_name || null,
-            row.project_id || null
-          ]
+      if ((asnCheck.rows[0]?.count || 0) === 0) {
+        throw createHttpError(
+          "Tidak dapat membuka periode: tidak ada penugasan evaluasi mahasiswa (0 assignments). Pastikan kelompok evaluasi dan PM sudah dikonfigurasi.",
+          422
         );
       }
     }
@@ -638,7 +1653,16 @@ async function openEvaluationPeriod(id, openedBy = null, executor = pool) {
   }
 }
 
-async function closeEvaluationPeriod(id, closedBy = null, executor = pool) {
+async function closeEvaluationPeriod(id, closedBy = null, optionsOrExecutor = {}, possibleExecutor = pool) {
+  let options = {};
+  let executor = pool;
+  if (typeof optionsOrExecutor === "object" && optionsOrExecutor !== null && typeof optionsOrExecutor.query !== "function" && typeof optionsOrExecutor.connect !== "function") {
+    options = optionsOrExecutor;
+    executor = possibleExecutor || pool;
+  } else if (optionsOrExecutor) {
+    executor = optionsOrExecutor;
+  }
+
   await ensureEvaluationTables(executor);
   const client = typeof executor.connect === "function" ? await executor.connect() : executor;
   const ownsTransaction = typeof executor.connect === "function";
@@ -656,6 +1680,39 @@ async function closeEvaluationPeriod(id, closedBy = null, executor = pool) {
     if (period.status === "CLOSED") {
       if (ownsTransaction) await client.query("COMMIT");
       return mapPeriodRow(period);
+    }
+
+    const force = Boolean(options.force || options.override);
+
+    if (!force && (period.type === "PM_EVALUATION" || period.type === "PM_BIWEEKLY")) {
+      // 1. Validate all evaluators have attendance resolved (no PENDING)
+      const pendingAttendances = await client.query(
+        "SELECT COUNT(*)::int AS count FROM evaluation_period_evaluators WHERE period_id = $1 AND attendance_status = 'PENDING'",
+        [id]
+      );
+      if ((pendingAttendances.rows[0]?.count || 0) > 0) {
+        throw createHttpError(
+          `Periode tidak dapat ditutup: terdapat ${pendingAttendances.rows[0].count} evaluator dengan status kehadiran PENDING yang belum dikonfirmasi.`,
+          422
+        );
+      }
+
+      // 2. Validate all PRESENT evaluators have submitted all their assignments
+      const unsubmittedRes = await client.query(
+        `SELECT COUNT(*)::int AS count
+         FROM evaluation_assignments ea
+         JOIN evaluation_period_evaluators epe ON epe.period_id = ea.period_id AND epe.evaluator_id = ea.evaluator_id
+         WHERE ea.period_id = $1
+           AND epe.attendance_status = 'PRESENT'
+           AND ea.status <> 'SUBMITTED'`,
+        [id]
+      );
+      if ((unsubmittedRes.rows[0]?.count || 0) > 0) {
+        throw createHttpError(
+          `Periode tidak dapat ditutup: terdapat ${unsubmittedRes.rows[0].count} penugasan evaluator PRESENT yang belum disubmit.`,
+          422
+        );
+      }
     }
 
     const updatedRes = await client.query(
@@ -708,7 +1765,7 @@ async function listEvaluationCriteria(periodType = null, executor = query) {
 // PM EVALUATION ASSIGNMENTS
 // =============================================================================
 
-async function listPmAssignments({ periodId, evaluatorId = null, divisionId = null, status = null } = {}, executor = query) {
+async function listPmAssignments({ periodId, evaluatorId = null, groupId = null, divisionId = null, status = null } = {}, executor = query) {
   await ensureEvaluationTables(executor);
   if (!periodId) throw createHttpError("periodId wajib diisi.", 400);
 
@@ -718,6 +1775,10 @@ async function listPmAssignments({ periodId, evaluatorId = null, divisionId = nu
   if (evaluatorId) {
     params.push(evaluatorId);
     conditions.push(`ea.evaluator_id = $${params.length}`);
+  }
+  if (groupId) {
+    params.push(groupId);
+    conditions.push(`ea.group_id = $${params.length}`);
   }
   if (divisionId) {
     params.push(divisionId);
@@ -734,6 +1795,7 @@ async function listPmAssignments({ periodId, evaluatorId = null, divisionId = nu
     SELECT ea.*,
            s.nim, u_student.name AS student_name,
            u_evaluator.name AS evaluator_name,
+           COALESCE(epe.attendance_status, 'PENDING') AS attendance_status,
            es.id AS submission_id,
            es.status AS submission_status,
            es.overall_score,
@@ -744,6 +1806,7 @@ async function listPmAssignments({ periodId, evaluatorId = null, divisionId = nu
     JOIN students s ON s.id = ea.student_id
     JOIN users u_student ON u_student.id = s.user_id
     JOIN users u_evaluator ON u_evaluator.id = ea.evaluator_id
+    LEFT JOIN evaluation_period_evaluators epe ON epe.period_id = ea.period_id AND epe.evaluator_id = ea.evaluator_id
     LEFT JOIN evaluation_submissions es ON es.assignment_id = ea.id
     WHERE ${conditions.join(" AND ")}
     ORDER BY ea.division_name ASC NULLS LAST, u_student.name ASC
@@ -763,6 +1826,7 @@ async function getPmAssignmentById(id, executor = query) {
            ep.title AS period_title, ep.status AS period_status, ep.type AS period_type,
            s.nim, u_student.name AS student_name,
            u_evaluator.name AS evaluator_name,
+           COALESCE(epe.attendance_status, 'PENDING') AS attendance_status,
            es.id AS submission_id,
            es.status AS submission_status,
            es.overall_score,
@@ -775,6 +1839,7 @@ async function getPmAssignmentById(id, executor = query) {
     JOIN students s ON s.id = ea.student_id
     JOIN users u_student ON u_student.id = s.user_id
     JOIN users u_evaluator ON u_evaluator.id = ea.evaluator_id
+    LEFT JOIN evaluation_period_evaluators epe ON epe.period_id = ea.period_id AND epe.evaluator_id = ea.evaluator_id
     LEFT JOIN evaluation_submissions es ON es.assignment_id = ea.id
     WHERE ea.id = $1
     LIMIT 1
@@ -881,6 +1946,30 @@ async function savePmEvaluationSubmission(assignmentId, evaluatorId, payload = {
     // Permission: Evaluator must be assigned evaluator (or caller handled admin bypass)
     if (evaluatorId && assignment.evaluator_id !== evaluatorId) {
       throw createHttpError("Akses ditolak. Anda tidak berhak menilai penugasan ini.", 403);
+    }
+
+    // Attendance validation: Evaluator must be PRESENT
+    const attRes = await client.query(
+      "SELECT attendance_status FROM evaluation_period_evaluators WHERE period_id = $1 AND evaluator_id = $2 LIMIT 1",
+      [assignment.period_id, assignment.evaluator_id]
+    );
+    if (attRes.rowCount > 0) {
+      const attStatus = attRes.rows[0].attendance_status;
+      if (attStatus === "PENDING") {
+        throw createHttpError("Evaluator belum dikonfirmasi hadir (status kehadiran: PENDING). Admin harus mengonfirmasi kehadiran sebelum pengisian nilai.", 422);
+      }
+      if (attStatus === "ABSENT") {
+        throw createHttpError("Evaluator berstatus tidak hadir (ABSENT), penilaian tidak dapat diberikan.", 422);
+      }
+    } else {
+      const peId = buildId("EVA-PEV");
+      await client.query(
+        `INSERT INTO evaluation_period_evaluators (id, period_id, evaluator_id, group_id, attendance_status)
+         VALUES ($1, $2, $3, $4, 'PENDING')
+         ON CONFLICT (period_id, evaluator_id) DO NOTHING`,
+        [peId, assignment.period_id, assignment.evaluator_id, assignment.group_id || null]
+      );
+      throw createHttpError("Evaluator belum dikonfirmasi hadir (status kehadiran: PENDING). Admin harus mengonfirmasi kehadiran sebelum pengisian nilai.", 422);
     }
 
     const targetStatus = String(payload.status || "DRAFT").toUpperCase();
@@ -1694,6 +2783,7 @@ async function getEvaluationPeriodProgress(periodId, executor = query) {
       `
       SELECT
         COUNT(*)::int AS total_assignments,
+        COUNT(DISTINCT ea.student_id)::int AS unique_students,
         COUNT(CASE WHEN ea.status = 'SUBMITTED' THEN 1 END)::int AS submitted_count,
         COUNT(CASE WHEN ea.status = 'DRAFT' THEN 1 END)::int AS draft_count,
         COUNT(CASE WHEN ea.status = 'PENDING' THEN 1 END)::int AS pending_count
@@ -1703,24 +2793,41 @@ async function getEvaluationPeriodProgress(periodId, executor = query) {
       [periodId]
     );
 
+    const evaluatorsSummaryRes = await runQuery(
+      executor,
+      `
+      SELECT
+        COUNT(*)::int AS total_evaluators,
+        COUNT(CASE WHEN epe.attendance_status = 'PRESENT' THEN 1 END)::int AS present_evaluators,
+        COUNT(CASE WHEN epe.attendance_status = 'ABSENT' THEN 1 END)::int AS absent_evaluators,
+        COUNT(CASE WHEN epe.attendance_status = 'PENDING' THEN 1 END)::int AS pending_evaluators
+      FROM evaluation_period_evaluators epe
+      WHERE epe.period_id = $1
+      `,
+      [periodId]
+    );
+
+    const evaluatorsList = await listPeriodEvaluators(periodId, executor);
+
     const divisionRes = await runQuery(
       executor,
       `
       SELECT
-        COALESCE(ea.division_name, 'Tanpa Divisi') AS division_name,
+        COALESCE(ea.group_name, ea.division_name, 'Tanpa Divisi') AS division_name,
         COUNT(*)::int AS total,
         COUNT(CASE WHEN ea.status = 'SUBMITTED' THEN 1 END)::int AS submitted,
         COUNT(CASE WHEN ea.status = 'DRAFT' THEN 1 END)::int AS draft,
         COUNT(CASE WHEN ea.status = 'PENDING' THEN 1 END)::int AS pending
       FROM evaluation_assignments ea
       WHERE ea.period_id = $1
-      GROUP BY ea.division_name
-      ORDER BY ea.division_name ASC NULLS LAST
+      GROUP BY COALESCE(ea.group_name, ea.division_name, 'Tanpa Divisi')
+      ORDER BY division_name ASC NULLS LAST
       `,
       [periodId]
     );
 
     const summary = summaryRes.rows[0];
+    const evSummary = evaluatorsSummaryRes.rows[0] || {};
     const total = summary.total_assignments || 0;
     const submitted = summary.submitted_count || 0;
     const progressPct = total > 0 ? Math.round((submitted / total) * 100) : 0;
@@ -1729,11 +2836,17 @@ async function getEvaluationPeriodProgress(periodId, executor = query) {
       period,
       summary: {
         totalAssignments: total,
+        uniqueStudents: summary.unique_students || 0,
+        totalEvaluators: evSummary.total_evaluators || 0,
+        presentEvaluators: evSummary.present_evaluators || 0,
+        absentEvaluators: evSummary.absent_evaluators || 0,
+        pendingEvaluators: evSummary.pending_evaluators || 0,
         submittedCount: submitted,
         draftCount: summary.draft_count,
         pendingCount: summary.pending_count,
         progressPct
       },
+      evaluators: evaluatorsList,
       divisionBreakdown: divisionRes.rows
     };
   } else {
@@ -1803,9 +2916,13 @@ async function getEvaluationPeriodRecap(periodId, executor = query) {
     const rows = await runQuery(
       executor,
       `
-      SELECT ea.id AS assignment_id, ea.student_id, ea.division_name, ea.status AS assignment_status,
+      SELECT ea.id AS assignment_id, ea.period_id, ea.student_id, ea.evaluator_id,
+             ea.group_id, ea.group_name,
+             COALESCE(ea.group_name, ea.division_name, 'Tanpa Divisi') AS division_name,
+             ea.status AS assignment_status,
              s.nim, u_student.name AS student_name,
              u_evaluator.name AS evaluator_name,
+             COALESCE(epe.attendance_status, 'PENDING') AS attendance_status,
              es.id AS submission_id,
              es.status AS submission_status,
              es.overall_score,
@@ -1817,30 +2934,114 @@ async function getEvaluationPeriodRecap(periodId, executor = query) {
       JOIN students s ON s.id = ea.student_id
       JOIN users u_student ON u_student.id = s.user_id
       JOIN users u_evaluator ON u_evaluator.id = ea.evaluator_id
+      LEFT JOIN evaluation_period_evaluators epe ON epe.period_id = ea.period_id AND epe.evaluator_id = ea.evaluator_id
       LEFT JOIN evaluation_submissions es ON es.assignment_id = ea.id
       WHERE ea.period_id = $1
-      ORDER BY ea.division_name ASC NULLS LAST, u_student.name ASC
+      ORDER BY ea.division_name ASC NULLS LAST, u_student.name ASC, u_evaluator.name ASC
       `,
       [periodId]
     );
 
-    return {
-      period,
-      items: rows.rows.map((row) => ({
+    const studentMap = new Map();
+    for (const row of rows.rows) {
+      if (!studentMap.has(row.student_id)) {
+        studentMap.set(row.student_id, {
+          studentId: row.student_id,
+          studentName: row.student_name,
+          nim: row.nim,
+          groupId: row.group_id || null,
+          groupName: row.group_name || null,
+          divisionName: row.division_name || "Tanpa Divisi",
+          evaluations: []
+        });
+      }
+      studentMap.get(row.student_id).evaluations.push({
         assignmentId: row.assignment_id,
-        studentId: row.student_id,
-        studentName: row.student_name,
-        nim: row.nim,
-        divisionName: row.division_name || "Tanpa Divisi",
+        evaluatorId: row.evaluator_id,
         evaluatorName: row.evaluator_name,
+        attendanceStatus: row.attendance_status,
         assignmentStatus: row.assignment_status,
-        submissionStatus: row.submission_status || "PENDING",
+        submissionId: row.submission_id,
+        submissionStatus: row.submission_status || row.assignment_status || "PENDING",
         overallScore: row.overall_score != null ? Number(row.overall_score) : null,
         strength: row.strength || null,
         improvement: row.improvement || null,
         notes: row.notes || null,
         submittedAt: row.submitted_at || null
-      }))
+      });
+    }
+
+    const items = [];
+    for (const [studentId, item] of studentMap.entries()) {
+      const evals = item.evaluations;
+      const totalEvaluators = evals.length;
+      const presentEvaluators = evals.filter((e) => e.attendanceStatus === "PRESENT").length;
+      const absentEvaluators = evals.filter((e) => e.attendanceStatus === "ABSENT").length;
+      const pendingEvaluators = evals.filter((e) => e.attendanceStatus === "PENDING").length;
+
+      // Only consider submissions from PRESENT PMs that are SUBMITTED
+      const presentSubmitted = evals.filter((e) => e.attendanceStatus === "PRESENT" && e.submissionStatus === "SUBMITTED" && e.overallScore != null);
+      const submittedScores = presentSubmitted.map((e) => e.overallScore);
+      const avgScore = calculateAverageScore(submittedScores);
+
+      let status = "INCOMPLETE";
+      let finalScore = null;
+      let provisionalScore = null;
+
+      if (totalEvaluators > 0 && absentEvaluators === totalEvaluators) {
+        status = "EXEMPT";
+        finalScore = null;
+        provisionalScore = null;
+      } else if (pendingEvaluators === 0 && presentEvaluators > 0 && presentSubmitted.length === presentEvaluators) {
+        status = "FINAL";
+        finalScore = avgScore;
+        provisionalScore = avgScore;
+      } else if (presentSubmitted.length > 0) {
+        status = "PROVISIONAL";
+        finalScore = null;
+        provisionalScore = avgScore;
+      } else {
+        status = "INCOMPLETE";
+        finalScore = null;
+        provisionalScore = null;
+      }
+
+      const primaryEval = presentSubmitted[0] || evals[0] || {};
+
+      items.push({
+        studentId: item.studentId,
+        studentName: item.studentName,
+        nim: item.nim,
+        groupId: item.groupId,
+        groupName: item.groupName,
+        divisionName: item.divisionName,
+        status, // FINAL, PROVISIONAL, INCOMPLETE, EXEMPT
+        finalScore,
+        provisionalScore,
+        totalEvaluators,
+        presentEvaluators,
+        absentEvaluators,
+        pendingEvaluators,
+        submittedCount: presentSubmitted.length,
+        evaluations: evals,
+
+        // Flat fields for backwards-compatibility:
+        assignmentId: primaryEval.assignmentId,
+        evaluatorName: evals.map((e) => e.evaluatorName).join(", "),
+        assignmentStatus: status === "FINAL" ? "SUBMITTED" : (primaryEval.assignmentStatus || "PENDING"),
+        submissionStatus: status === "FINAL" ? "SUBMITTED" : (primaryEval.submissionStatus || "PENDING"),
+        overallScore: finalScore != null ? finalScore : provisionalScore,
+        strength: evals.map((e) => e.strength).filter(Boolean).join("; ") || null,
+        improvement: evals.map((e) => e.improvement).filter(Boolean).join("; ") || null,
+        notes: evals.map((e) => e.notes).filter(Boolean).join("; ") || null,
+        submittedAt: primaryEval.submittedAt || null
+      });
+    }
+
+    return {
+      period,
+      items,
+      students: items
     };
   } else {
     // MONTHLY_PRESENTATION
@@ -1916,38 +3117,48 @@ async function getStudentEvaluationHistory(studentIdOrUserId, optionsOrExecutor 
   if (!student) throw createHttpError("Mahasiswa tidak ditemukan.", 404);
 
   // PM evaluations
-  const pmEvaluations = await runQuery(
+  const pmAssignmentsRes = await runQuery(
     executor,
     `
-    SELECT es.*, ep.id AS period_id, ep.title AS period_title, ep.status AS period_status,
-           ep.type AS period_type, ep.start_date, ep.end_date,
-           ea.division_name, u.name AS evaluator_name
-    FROM evaluation_submissions es
-    JOIN evaluation_periods ep ON ep.id = es.period_id
-    JOIN evaluation_assignments ea ON ea.id = es.assignment_id
-    JOIN users u ON u.id = es.evaluator_id
-    WHERE es.student_id = $1 AND es.status = 'SUBMITTED'
-    ORDER BY ep.start_date DESC
+    SELECT ea.id AS assignment_id, ea.period_id, ea.student_id, ea.evaluator_id,
+           ea.group_id, ea.group_name,
+           COALESCE(ea.group_name, ea.division_name, 'Tanpa Divisi') AS division_name,
+           ea.status AS assignment_status,
+           ep.title AS period_title, ep.status AS period_status, ep.type AS period_type,
+           ep.start_date, ep.end_date,
+           u.name AS evaluator_name,
+           COALESCE(epe.attendance_status, 'PENDING') AS attendance_status,
+           es.id AS submission_id, es.status AS submission_status,
+           es.overall_score, es.strength, es.improvement, es.notes, es.submitted_at
+    FROM evaluation_assignments ea
+    JOIN evaluation_periods ep ON ep.id = ea.period_id
+    JOIN users u ON u.id = ea.evaluator_id
+    LEFT JOIN evaluation_period_evaluators epe ON epe.period_id = ea.period_id AND epe.evaluator_id = ea.evaluator_id
+    LEFT JOIN evaluation_submissions es ON es.assignment_id = ea.id
+    WHERE ea.student_id = $1
+    ORDER BY ep.start_date DESC, u.name ASC
     `,
     [student.id]
   );
 
-  // Presentation evaluations
   const presentationSlots = await runQuery(
     executor,
     `
-    SELECT slot.*, ps.title AS session_title, ps.session_date,
-           ep.id AS period_id, ep.title AS period_title, ep.status AS period_status, ep.start_date AS period_start_date,
-           (
-             SELECT ROUND(AVG(sub.overall_score)::numeric, 2)
-             FROM evaluation_submissions sub
-             WHERE sub.slot_id = slot.id AND sub.status = 'SUBMITTED'
-           ) AS presentation_score,
+    SELECT slot.id, slot.session_id, slot.student_id, slot.slot_order, slot.status,
+           slot.topic, slot.notes,
+           ps.title AS session_title, ps.session_date,
+           ep.id AS period_id, ep.title AS period_title, ep.status AS period_status,
+           ep.start_date AS period_start_date,
            (
              SELECT COUNT(*)::int
              FROM evaluation_submissions sub
              WHERE sub.slot_id = slot.id AND sub.status = 'SUBMITTED'
-           ) AS evaluator_count
+           ) AS evaluator_count,
+           (
+             SELECT AVG(sub.overall_score)::numeric(4, 2)
+             FROM evaluation_submissions sub
+             WHERE sub.slot_id = slot.id AND sub.status = 'SUBMITTED'
+           ) AS presentation_score
     FROM presentation_slots slot
     JOIN presentation_sessions ps ON ps.id = slot.session_id
     JOIN evaluation_periods ep ON ep.id = ps.period_id
@@ -1957,6 +3168,93 @@ async function getStudentEvaluationHistory(studentIdOrUserId, optionsOrExecutor 
     [student.id]
   );
 
+  const periodMap = new Map();
+  for (const row of pmAssignmentsRes.rows) {
+    if (!periodMap.has(row.period_id)) {
+      periodMap.set(row.period_id, {
+        periodId: row.period_id,
+        periodTitle: row.period_title,
+        periodType: row.period_type === "PM_BIWEEKLY" ? "PM_EVALUATION" : (row.period_type || "PM_EVALUATION"),
+        periodStatus: row.period_status,
+        startDate: formatDateOnly(row.start_date),
+        endDate: formatDateOnly(row.end_date),
+        evaluationMonth: row.start_date ? formatDateOnly(row.start_date).slice(0, 7) : null,
+        divisionName: row.division_name,
+        evaluations: []
+      });
+    }
+    periodMap.get(row.period_id).evaluations.push(row);
+  }
+
+  const pmEvaluationsList = [];
+  for (const [pId, pData] of periodMap.entries()) {
+    const evals = pData.evaluations;
+    const totalEvaluators = evals.length;
+    const presentEvaluators = evals.filter((e) => e.attendance_status === "PRESENT").length;
+    const absentEvaluators = evals.filter((e) => e.attendance_status === "ABSENT").length;
+    const pendingEvaluators = evals.filter((e) => e.attendance_status === "PENDING").length;
+
+    // Filter to PRESENT and SUBMITTED
+    const presentSubmitted = evals.filter((e) => e.attendance_status === "PRESENT" && e.submission_status === "SUBMITTED" && e.overall_score != null);
+    const submittedScores = presentSubmitted.map((e) => Number(e.overall_score));
+    const avgScore = calculateAverageScore(submittedScores);
+
+    let status = "INCOMPLETE";
+    let finalScore = null;
+    let provisionalScore = null;
+
+    if (totalEvaluators > 0 && absentEvaluators === totalEvaluators) {
+      status = "EXEMPT";
+    } else if (pendingEvaluators === 0 && presentEvaluators > 0 && presentSubmitted.length === presentEvaluators) {
+      status = "FINAL";
+      finalScore = avgScore;
+      provisionalScore = avgScore;
+    } else if (presentSubmitted.length > 0) {
+      status = "PROVISIONAL";
+      provisionalScore = avgScore;
+    } else {
+      status = "INCOMPLETE";
+    }
+
+    const isPeriodClosed = pData.periodStatus === "CLOSED";
+    const resultAvailable = !isStudent || isPeriodClosed;
+
+    const hasAnySubmitted = evals.some((e) => e.submission_status === "SUBMITTED");
+    if (!hasAnySubmitted) {
+      continue;
+    }
+
+    const primarySub = presentSubmitted[0] || evals.find((e) => e.submission_status === "SUBMITTED") || evals[0];
+
+    pmEvaluationsList.push({
+      submissionId: primarySub.submission_id || primarySub.assignment_id,
+      periodId: pData.periodId,
+      periodTitle: pData.periodTitle,
+      periodType: pData.periodType,
+      periodStatus: pData.periodStatus,
+      evaluationMonth: pData.evaluationMonth,
+      resultAvailable,
+      startDate: pData.startDate,
+      endDate: pData.endDate,
+      divisionName: pData.divisionName,
+      evaluatorName: evals.map((e) => e.evaluator_name).join(", "),
+      status, // FINAL, PROVISIONAL, INCOMPLETE, EXEMPT
+      overallScore: resultAvailable ? (finalScore != null ? finalScore : (isStudent ? null : provisionalScore)) : null,
+      strength: resultAvailable ? (evals.map((e) => e.strength).filter(Boolean).join("; ") || null) : null,
+      improvement: resultAvailable ? (evals.map((e) => e.improvement).filter(Boolean).join("; ") || null) : null,
+      notes: resultAvailable ? (evals.map((e) => e.notes).filter(Boolean).join("; ") || null) : null,
+      submittedAt: resultAvailable ? (primarySub.submitted_at || null) : null,
+      evaluations: resultAvailable ? evals.map((e) => ({
+        evaluatorName: e.evaluator_name,
+        attendanceStatus: e.attendance_status,
+        submissionStatus: e.submission_status,
+        overallScore: e.overall_score != null ? Number(e.overall_score) : null,
+        strength: e.strength || null,
+        improvement: e.improvement || null
+      })) : []
+    });
+  }
+
   return {
     student: {
       id: student.id,
@@ -1964,33 +3262,7 @@ async function getStudentEvaluationHistory(studentIdOrUserId, optionsOrExecutor 
       name: student.name,
       nim: student.nim
     },
-    pmEvaluations: pmEvaluations.rows.map((row) => {
-      const isPeriodClosed = row.period_status === "CLOSED";
-      const resultAvailable = !isStudent || isPeriodClosed;
-      const startDate = formatDateOnly(row.start_date);
-      const endDate = formatDateOnly(row.end_date);
-      const evaluationMonth = startDate ? startDate.slice(0, 7) : null;
-      const periodType = row.period_type === "PM_BIWEEKLY" ? "PM_EVALUATION" : (row.period_type || "PM_EVALUATION");
-
-      return {
-        submissionId: row.id,
-        periodId: row.period_id,
-        periodTitle: row.period_title,
-        periodType,
-        periodStatus: row.period_status,
-        evaluationMonth,
-        resultAvailable,
-        startDate,
-        endDate,
-        divisionName: row.division_name,
-        evaluatorName: row.evaluator_name,
-        overallScore: resultAvailable ? (row.overall_score != null ? Number(row.overall_score) : null) : null,
-        strength: resultAvailable ? (row.strength || null) : null,
-        improvement: resultAvailable ? (row.improvement || null) : null,
-        notes: resultAvailable ? (row.notes || null) : null,
-        submittedAt: resultAvailable ? (row.submitted_at || null) : null
-      };
-    }),
+    pmEvaluations: pmEvaluationsList,
     presentationEvaluations: presentationSlots.rows.map((row) => {
       const isPeriodClosed = row.period_status === "CLOSED";
       const resultAvailable = !isStudent || isPeriodClosed;
@@ -2066,5 +3338,23 @@ module.exports = {
   formatDateOnly,
   mapPeriodRow,
   mapAssignmentRow,
-  mapScoreItemRow
+  mapScoreItemRow,
+  listEvaluationGroups,
+  getEvaluationGroupById,
+  createEvaluationGroup,
+  updateEvaluationGroup,
+  addEvaluationGroupRole,
+  removeEvaluationGroupRole,
+  addEvaluationGroupStudent,
+  removeEvaluationGroupStudent,
+  getEligibleGroupStudents,
+  listGroupEvaluators,
+  addGroupEvaluator,
+  removeGroupEvaluator,
+  listPeriodEvaluators,
+  addPeriodEvaluator,
+  updatePeriodEvaluatorAttendance,
+  removePeriodEvaluator,
+  previewPeriodAssignments,
+  syncPeriodAssignments
 };

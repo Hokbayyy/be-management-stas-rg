@@ -900,6 +900,7 @@ CREATE TABLE IF NOT EXISTS evaluation_periods (
   end_date DATE NOT NULL,
   description TEXT,
   created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  group_id TEXT REFERENCES evaluation_groups(id) ON DELETE SET NULL,
   opened_at TIMESTAMPTZ,
   closed_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -924,6 +925,58 @@ CREATE TABLE IF NOT EXISTS evaluation_criteria (
 );
 CREATE INDEX IF NOT EXISTS idx_evaluation_criteria_type_sort ON evaluation_criteria(period_type, sort_order ASC);
 
+CREATE TABLE IF NOT EXISTS evaluation_groups (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS evaluation_group_role_mappings (
+  id TEXT PRIMARY KEY,
+  group_id TEXT NOT NULL REFERENCES evaluation_groups(id) ON DELETE CASCADE,
+  role_pattern TEXT NOT NULL,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (group_id, role_pattern)
+);
+
+CREATE TABLE IF NOT EXISTS evaluation_group_students (
+  id TEXT PRIMARY KEY,
+  group_id TEXT NOT NULL REFERENCES evaluation_groups(id) ON DELETE CASCADE,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (group_id, student_id)
+);
+
+CREATE TABLE IF NOT EXISTS evaluation_group_evaluators (
+  id TEXT PRIMARY KEY,
+  group_id TEXT NOT NULL REFERENCES evaluation_groups(id) ON DELETE CASCADE,
+  evaluator_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (group_id, evaluator_id)
+);
+
+CREATE TABLE IF NOT EXISTS evaluation_period_evaluators (
+  id TEXT PRIMARY KEY,
+  period_id TEXT NOT NULL REFERENCES evaluation_periods(id) ON DELETE CASCADE,
+  evaluator_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  group_id TEXT REFERENCES evaluation_groups(id) ON DELETE SET NULL,
+  attendance_status TEXT NOT NULL DEFAULT 'PENDING' CHECK (attendance_status IN ('PENDING', 'PRESENT', 'ABSENT')),
+  confirmed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  confirmed_at TIMESTAMPTZ,
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (period_id, evaluator_id)
+);
+CREATE INDEX IF NOT EXISTS idx_evaluation_period_evaluators_period ON evaluation_period_evaluators(period_id);
+CREATE INDEX IF NOT EXISTS idx_evaluation_period_evaluators_evaluator ON evaluation_period_evaluators(evaluator_id);
+
 CREATE TABLE IF NOT EXISTS evaluation_assignments (
   id TEXT PRIMARY KEY,
   period_id TEXT NOT NULL REFERENCES evaluation_periods(id) ON DELETE CASCADE,
@@ -932,6 +985,8 @@ CREATE TABLE IF NOT EXISTS evaluation_assignments (
   division_id TEXT REFERENCES research_divisions(id) ON DELETE SET NULL,
   division_name TEXT,
   project_id TEXT REFERENCES research_projects(id) ON DELETE SET NULL,
+  group_id TEXT REFERENCES evaluation_groups(id) ON DELETE SET NULL,
+  group_name TEXT,
   status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'DRAFT', 'SUBMITTED')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -940,6 +995,7 @@ CREATE TABLE IF NOT EXISTS evaluation_assignments (
 CREATE INDEX IF NOT EXISTS idx_evaluation_assignments_period ON evaluation_assignments(period_id);
 CREATE INDEX IF NOT EXISTS idx_evaluation_assignments_evaluator ON evaluation_assignments(evaluator_id);
 CREATE INDEX IF NOT EXISTS idx_evaluation_assignments_student ON evaluation_assignments(student_id);
+CREATE INDEX IF NOT EXISTS idx_evaluation_assignments_group ON evaluation_assignments(group_id);
 
 CREATE TABLE IF NOT EXISTS presentation_sessions (
   id TEXT PRIMARY KEY,
