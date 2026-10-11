@@ -471,8 +471,8 @@ router.get(
     const assignment = await getPmAssignmentById(id);
     if (!assignment) return res.status(404).json({ message: "Penugasan evaluasi tidak ditemukan." });
 
-    const { isOperator, isDosen, userId } = getRequester(req);
-    if (!isOperator && !isDosen && assignment.evaluator_id !== userId) {
+    const { isOperator, userId } = getRequester(req);
+    if (!isOperator && assignment.evaluator_id !== userId) {
       return res.status(403).json({ message: "Akses ditolak. Anda tidak berhak melihat penugasan ini." });
     }
 
@@ -485,17 +485,17 @@ router.put(
   asyncHandler(async (req, res) => {
     if (!requireAuth(req, res)) return;
     const id = requireSafeId(req.params.id, "id");
-    const { isOperator, userId } = getRequester(req);
+    const { userId } = getRequester(req);
 
     const assignment = await getPmAssignmentById(id);
     if (!assignment) return res.status(404).json({ message: "Penugasan evaluasi tidak ditemukan." });
 
-    // PM only permitted to submit for their own assignment; operator can override
-    if (!isOperator && assignment.evaluator_id !== userId) {
-      return res.status(403).json({ message: "Akses ditolak. Anda tidak berhak menilai mahasiswa di luar divisi Anda." });
+    // Strictly enforce: only the assigned PM evaluator can draft or submit evaluation (no admin/operator bypass)
+    if (assignment.evaluator_id !== userId) {
+      return res.status(403).json({ message: "Akses ditolak. Anda tidak berhak menilai penugasan ini." });
     }
 
-    const updated = await savePmEvaluationSubmission(id, assignment.evaluator_id, req.body);
+    const updated = await savePmEvaluationSubmission(id, userId, req.body);
     const isSubmitted = req.body?.status === "SUBMITTED";
     res.json({
       message: isSubmitted ? "Evaluasi berhasil disubmit." : "Draft evaluasi berhasil disimpan.",

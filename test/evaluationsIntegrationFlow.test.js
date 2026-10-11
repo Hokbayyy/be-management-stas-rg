@@ -266,6 +266,21 @@ test("Final Integration Audit: End-to-End Evaluation Flows", async (t) => {
       }, { id: ids.pmA, role: "mahasiswa" });
 
       assert.equal(res.status, 403, "PM A evaluating division B must return 403");
+
+      // Admin/Operator attempting to submit for PM assignment must also be rejected (HTTP 403)
+      const adminSubmitRes = await api("PUT", `/pm/assignments/${pmA_Assignment.assignmentId}/submission`, {
+        status: "DRAFT",
+        scores: [{ criteriaKey: "quality_of_work", score: 8.0 }]
+      }, { id: ids.admin, role: "operator" });
+      assert.equal(adminSubmitRes.status, 403, "Admin attempting to submit PM assignment must return 403");
+
+      // PM A cannot read private assignment details of PM B (HTTP 403)
+      const pmReadRes = await api("GET", `/pm/assignments/${pmB_Assignment.assignmentId}`, null, { id: ids.pmA, role: "mahasiswa" });
+      assert.equal(pmReadRes.status, 403, "PM A cannot read PM B assignment details");
+
+      // Admin CAN read assignment details for oversight (HTTP 200)
+      const adminReadRes = await api("GET", `/pm/assignments/${pmA_Assignment.assignmentId}`, null, { id: ids.admin, role: "operator" });
+      assert.equal(adminReadRes.status, 200, "Admin can read PM assignment details for oversight");
     }
 
     // Step 6: Save partial DRAFT
@@ -316,6 +331,15 @@ test("Final Integration Audit: End-to-End Evaluation Flows", async (t) => {
       assert.equal(res.status, 200);
       assert.equal(res.body.assignment.submissionStatus, "SUBMITTED");
       assert.ok(res.body.assignment.overallScore != null);
+    }
+
+    // Step 8b: Assignment SUBMITTED tidak dapat diubah kembali (HTTP 409)
+    {
+      const resubmitTry = await api("PUT", `/pm/assignments/${pmA_Assignment.assignmentId}/submission`, {
+        status: "DRAFT",
+        scores: [{ criteriaKey: "quality_of_work", score: 9.0 }]
+      }, { id: ids.pmA, role: "mahasiswa" });
+      assert.equal(resubmitTry.status, 409, "Modifying an already SUBMITTED assignment must return 409");
     }
 
     // Step 9: Progress dan recap berubah benar

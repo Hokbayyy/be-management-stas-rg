@@ -6,6 +6,7 @@ const {
   calculateAverageScore,
   validateScoreRange,
   deleteEvaluationPeriod,
+  savePmEvaluationSubmission,
   INITIAL_PM_CRITERIA,
   INITIAL_PRESENTATION_CRITERIA
 } = require("../utils/evaluationService");
@@ -1120,4 +1121,154 @@ test("deleteEvaluationPeriod executes correct cascade queries against evaluation
   assert.ok(executedQueries.some((q) => q.sql.includes("DELETE FROM evaluation_assignments")));
   assert.ok(executedQueries.some((q) => q.sql.includes("DELETE FROM evaluation_period_evaluators")));
   assert.ok(executedQueries.some((q) => q.sql.includes("DELETE FROM evaluation_periods")));
+});
+
+test("savePmEvaluationSubmission authorization & validation: strictly enforces assigned evaluator, OPEN status, non-SUBMITTED status, and PRESENT attendance", async () => {
+  const assignment = {
+    id: "ASN-1",
+    period_id: "EVP-1",
+    student_id: "STD-1",
+    evaluator_id: "USER-PM-1",
+    status: "PENDING",
+    period_status: "OPEN",
+    period_type: "PM_EVALUATION"
+  };
+
+  const createMockExecutor = ({
+    periodStatus = "OPEN",
+    assignmentStatus = "PENDING",
+    submissionStatus = null,
+    attendanceStatus = "PRESENT"
+  } = {}) => ({
+    query: async (sql, params) => {
+      const q = sql.trim();
+      if (q.includes("information_schema.tables")) return { rows: [{ exists: true }] };
+      if (q.includes("FROM evaluation_assignments ea")) {
+        return {
+          rows: [{ ...assignment, status: assignmentStatus, period_status: periodStatus }],
+          rowCount: 1
+        };
+      }
+      if (q.includes("FROM evaluation_submissions WHERE assignment_id = $1")) {
+        return submissionStatus
+          ? { rows: [{ id: "SUB-1", status: submissionStatus }], rowCount: 1 }
+          : { rows: [], rowCount: 0 };
+      }
+      if (q.includes("FROM evaluation_period_evaluators WHERE period_id = $1 AND evaluator_id = $2")) {
+        return { rows: [{ attendance_status: attendanceStatus }], rowCount: 1 };
+      }
+      if (q.includes("FROM evaluation_criteria")) {
+        return { rows: INITIAL_PM_CRITERIA.map((c) => ({ ...c, id: `CRIT-${c.key}` })), rowCount: INITIAL_PM_CRITERIA.length };
+      }
+      if (q.includes("SELECT ea.*") && q.includes("FROM evaluation_assignments ea")) {
+        return { rows: [{ ...assignment, status: "DRAFT" }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 1 };
+    }
+  });
+
+  const validDraftPayload = {
+    status: "DRAFT",
+    scores: [{ criteriaKey: "quality_of_work", score: 8.0 }]
+  };
+
+  // 1. Admin/another user attempting to submit for PM assignment -> 403
+  await assert.rejects(
+    async () => {
+      await savePmEvaluationSubmission("ASN-1", "USER-ADMIN", validDraftPayload, createMockExecutor());
+    },
+    (err) => {
+      assert.equal(err.statusCode, 403);
+      assert.match(err.message, /tidak berhak menilai/);
+      return true;
+    }
+  );
+
+  // 2. PM1 evaluating PM2 assignment -> 403
+  await assert.rejects(
+    async () => {
+      await savePmEvaluationSubmission("ASN-1", "USER-PM-2", validDraftPayload, createMockExecutor());
+    },
+    (err) => {
+      assert.equal(err.statusCode, 403);
+      return true;
+    }
+  );
+
+  // 3. PM attendance PENDING -> 422
+  await assert.rejects(
+    async () => {
+      await savePmEvaluationSubmission("ASN-1", "USER-PM-1", validDraftPayload, createMockExecutor({ attendanceStatus: "PENDING" }));
+    },
+    (err) => {
+      assert.equal(err.statusCode, 422);
+      assert.match(err.message, /PENDING/);
+      return true;
+    }
+  );
+
+  // 4. PM attendance ABSENT -> 422
+  await assert.rejects(
+    async () => {
+      await savePmEvaluationSubmission("ASN-1", "USER-PM-1", validDraftPayload, createMockExecutor({ attendanceStatus: "ABSENT" }));
+    },
+    (err) => {
+      assert.equal(err.statusCode, 422);
+      assert.match(err.message, /ABSENT/);
+      return true;
+    }
+  );
+
+  // 5. Period CLOSED -> 409
+  await assert.rejects(
+    async () => {
+      await savePmEvaluationSubmission("ASN-1", "USER-PM-1", validDraftPayload, createMockExecutor({ periodStatus: "CLOSED" }));
+    },
+    (err) => {
+      assert.equal(err.statusCode, 409);
+      assert.match(err.message, /sudah ditutup/);
+      return true;
+    }
+  );
+
+  // 6. Period DRAFT (not OPEN) -> 409
+  await assert.rejects(
+    async () => {
+      await savePmEvaluationSubmission("ASN-1", "USER-PM-1", validDraftPayload, createMockExecutor({ periodStatus: "DRAFT" }));
+    },
+    (err) => {
+      assert.equal(err.statusCode, 409);
+      assert.match(err.message, /OPEN/);
+      return true;
+    }
+  );
+
+  // 7. Assignment already SUBMITTED -> 409
+  await assert.rejects(
+    async () => {
+      await savePmEvaluationSubmission("ASN-1", "USER-PM-1", validDraftPayload, createMockExecutor({ assignmentStatus: "SUBMITTED" }));
+    },
+    (err) => {
+      assert.equal(err.statusCode, 409);
+      assert.match(err.message, /sudah disubmit/);
+      return true;
+    }
+  );
+
+  // 8. Submission already SUBMITTED -> 409
+  await assert.rejects(
+    async () => {
+      await savePmEvaluationSubmission("ASN-1", "USER-PM-1", validDraftPayload, createMockExecutor({ submissionStatus: "SUBMITTED" }));
+    },
+    (err) => {
+      assert.equal(err.statusCode, 409);
+      assert.match(err.message, /sudah disubmit/);
+      return true;
+    }
+  );
+
+  // 9. Assigned PM with PRESENT attendance and OPEN period -> succeeds
+  await assert.doesNotReject(async () => {
+    await savePmEvaluationSubmission("ASN-1", "USER-PM-1", validDraftPayload, createMockExecutor());
+  });
 });

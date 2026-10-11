@@ -1994,10 +1994,27 @@ async function savePmEvaluationSubmission(assignmentId, evaluatorId, payload = {
     if (assignment.period_status === "CLOSED") {
       throw createHttpError("Periode evaluasi sudah ditutup dan tidak dapat diubah.", 409);
     }
+    if (assignment.period_status !== "OPEN") {
+      throw createHttpError("Penilaian hanya dapat dilakukan saat periode berstatus OPEN.", 409);
+    }
 
-    // Permission: Evaluator must be assigned evaluator (or caller handled admin bypass)
-    if (evaluatorId && assignment.evaluator_id !== evaluatorId) {
+    // Permission: Authenticated user ID must match assigned evaluator_id
+    if (!evaluatorId || assignment.evaluator_id !== evaluatorId) {
       throw createHttpError("Akses ditolak. Anda tidak berhak menilai penugasan ini.", 403);
+    }
+
+    // Immutability: Assignment and submission must not be already SUBMITTED
+    if (assignment.status === "SUBMITTED") {
+      throw createHttpError("Penilaian sudah disubmit dan tidak dapat diubah kembali.", 409);
+    }
+
+    // Check existing submission for this assignment
+    const existingSubRes = await client.query(
+      "SELECT id, status FROM evaluation_submissions WHERE assignment_id = $1 LIMIT 1",
+      [assignmentId]
+    );
+    if (existingSubRes.rowCount > 0 && existingSubRes.rows[0].status === "SUBMITTED") {
+      throw createHttpError("Penilaian sudah disubmit dan tidak dapat diubah kembali.", 409);
     }
 
     // Attendance validation: Evaluator must be PRESENT
@@ -2012,6 +2029,9 @@ async function savePmEvaluationSubmission(assignmentId, evaluatorId, payload = {
       }
       if (attStatus === "ABSENT") {
         throw createHttpError("Evaluator berstatus tidak hadir (ABSENT), penilaian tidak dapat diberikan.", 422);
+      }
+      if (attStatus !== "PRESENT") {
+        throw createHttpError("Evaluator belum berstatus PRESENT, penilaian tidak dapat diberikan.", 422);
       }
     } else {
       const peId = buildId("EVA-PEV");
@@ -2072,12 +2092,6 @@ async function savePmEvaluationSubmission(assignmentId, evaluatorId, payload = {
       const sum = Array.from(scoreMap.values()).reduce((acc, curr) => acc + curr.score, 0);
       overallScore = Math.round((sum / scoreMap.size) * 100) / 100;
     }
-
-    // Check existing submission for this assignment
-    const existingSubRes = await client.query(
-      "SELECT id FROM evaluation_submissions WHERE assignment_id = $1 LIMIT 1",
-      [assignmentId]
-    );
 
     let submissionId;
     if (existingSubRes.rowCount > 0) {
