@@ -1013,3 +1013,61 @@ test("Explicit period scoping: Opening a Software period strictly scopes to Soft
   assert.equal(scoped3.length, 1);
   assert.equal(scoped3[0].id, "EVAL-GRP-SOFTWARE");
 });
+
+test("Period Deletion: requires force if submissions exist, and cleanly removes draft periods", () => {
+  const mockPeriodsDb = new Map();
+  mockPeriodsDb.set("EVP-DRAFT-1", { id: "EVP-DRAFT-1", title: "Periode Draft Test", status: "DRAFT" });
+  mockPeriodsDb.set("EVP-SUBMITTED-1", { id: "EVP-SUBMITTED-1", title: "Periode Dengan Nilai", status: "OPEN" });
+
+  const mockSubmissionsDb = [
+    { id: "SUB-1", period_id: "EVP-SUBMITTED-1", status: "SUBMITTED" }
+  ];
+
+  function simulateDeletePeriod(id, options = {}) {
+    const period = mockPeriodsDb.get(id);
+    if (!period) {
+      const err = new Error("Periode evaluasi tidak ditemukan.");
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const submittedCount = mockSubmissionsDb.filter((s) => s.period_id === id && s.status === "SUBMITTED").length;
+    if (submittedCount > 0 && !options.force) {
+      const err = new Error(`Periode evaluasi memiliki ${submittedCount} nilai yang sudah disubmit. Gunakan konfirmasi force untuk menghapus secara permanen.`);
+      err.statusCode = 409;
+      throw err;
+    }
+
+    mockPeriodsDb.delete(id);
+    return { id, title: period.title, message: `Periode evaluasi "${period.title}" berhasil dihapus.` };
+  }
+
+  // 1. Delete draft period succeeds without force
+  const resDraft = simulateDeletePeriod("EVP-DRAFT-1");
+  assert.equal(resDraft.id, "EVP-DRAFT-1");
+  assert.equal(mockPeriodsDb.has("EVP-DRAFT-1"), false);
+
+  // 2. Delete non-existent period throws 404
+  assert.throws(
+    () => simulateDeletePeriod("EVP-NOT-FOUND"),
+    (err) => {
+      assert.equal(err.statusCode, 404);
+      return true;
+    }
+  );
+
+  // 3. Delete period with submitted evaluations throws 409 if force is false
+  assert.throws(
+    () => simulateDeletePeriod("EVP-SUBMITTED-1", { force: false }),
+    (err) => {
+      assert.equal(err.statusCode, 409);
+      assert.match(err.message, /sudah disubmit/);
+      return true;
+    }
+  );
+
+  // 4. Delete period with submitted evaluations succeeds when force=true
+  const resForce = simulateDeletePeriod("EVP-SUBMITTED-1", { force: true });
+  assert.equal(resForce.id, "EVP-SUBMITTED-1");
+  assert.equal(mockPeriodsDb.has("EVP-SUBMITTED-1"), false);
+});

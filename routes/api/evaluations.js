@@ -9,6 +9,7 @@ const {
   updateEvaluationPeriod,
   openEvaluationPeriod,
   closeEvaluationPeriod,
+  deleteEvaluationPeriod,
   listEvaluationCriteria,
   listPmAssignments,
   getPmAssignmentById,
@@ -165,6 +166,17 @@ router.post(
     const { userId } = getRequester(req);
     const period = await closeEvaluationPeriod(id, userId, req.body);
     res.json({ message: "Periode evaluasi berhasil ditutup.", period });
+  })
+);
+
+router.delete(
+  "/periods/:id",
+  asyncHandler(async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = requireSafeId(req.params.id, "id");
+    const force = req.query.force === "true" || req.body?.force === true;
+    const result = await deleteEvaluationPeriod(id, { force });
+    res.json(result);
   })
 );
 
