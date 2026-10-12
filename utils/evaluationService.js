@@ -1483,29 +1483,9 @@ async function createEvaluationPeriod(payload = {}, createdBy = null, executor =
 
   const evaluationMonth = startDate.slice(0, 7);
 
-  // Validate: dalam scope bulan yang sama tidak dibuat lebih dari 1 PM_EVALUATION dan 1 MONTHLY_PRESENTATION
-  const duplicateRes = await runQuery(
-    executor,
-    `
-    SELECT id, title, type, start_date
-    FROM evaluation_periods
-    WHERE type = $1 AND TO_CHAR(start_date, 'YYYY-MM') = $2
-    LIMIT 1
-    `,
-    [type, evaluationMonth]
-  );
-
-  if (duplicateRes.rowCount > 0) {
-    const existing = duplicateRes.rows[0];
-    throw createHttpError(
-      `Periode evaluasi jenis ${type} untuk bulan ${evaluationMonth} sudah ada (${existing.title}). Dalam 1 bulan hanya diperbolehkan 1 ${type}.`,
-      409
-    );
-  }
-
   let groupId = payload.groupId || payload.group_id || null;
   if (groupId) {
-    const gCheck = await runQuery(executor, "SELECT id FROM evaluation_groups WHERE id = $1", [groupId]);
+    const gCheck = await runQuery(executor, "SELECT id, name FROM evaluation_groups WHERE id = $1", [groupId]);
     if (gCheck.rowCount === 0) {
       throw createHttpError("Kelompok evaluasi tidak ditemukan.", 404);
     }
@@ -1515,6 +1495,56 @@ async function createEvaluationPeriod(payload = {}, createdBy = null, executor =
     if (matched) {
       groupId = matched.id;
     }
+  }
+
+  // Validate duplicate:
+  // For PM_EVALUATION: dalam 1 bulan hanya boleh 1 periode per kelompok evaluasi (group_id).
+  // For MONTHLY_PRESENTATION: dalam 1 bulan hanya boleh 1 presentasi bulanan.
+  let duplicateRes;
+  if (type === "PM_EVALUATION") {
+    if (groupId) {
+      duplicateRes = await runQuery(
+        executor,
+        `
+        SELECT id, title, type, start_date, group_id
+        FROM evaluation_periods
+        WHERE type = $1 AND TO_CHAR(start_date, 'YYYY-MM') = $2 AND group_id = $3
+        LIMIT 1
+        `,
+        [type, evaluationMonth, groupId]
+      );
+    } else {
+      duplicateRes = await runQuery(
+        executor,
+        `
+        SELECT id, title, type, start_date, group_id
+        FROM evaluation_periods
+        WHERE type = $1 AND TO_CHAR(start_date, 'YYYY-MM') = $2 AND group_id IS NULL
+        LIMIT 1
+        `,
+        [type, evaluationMonth]
+      );
+    }
+  } else {
+    duplicateRes = await runQuery(
+      executor,
+      `
+      SELECT id, title, type, start_date
+      FROM evaluation_periods
+      WHERE type = $1 AND TO_CHAR(start_date, 'YYYY-MM') = $2
+      LIMIT 1
+      `,
+      [type, evaluationMonth]
+    );
+  }
+
+  if (duplicateRes.rowCount > 0) {
+    const existing = duplicateRes.rows[0];
+    const groupNotice = groupId ? " untuk kelompok ini" : "";
+    throw createHttpError(
+      `Periode evaluasi jenis ${type}${groupNotice} untuk bulan ${evaluationMonth} sudah ada (${existing.title}). Dalam 1 bulan hanya diperbolehkan 1 periode per kelompok evaluasi.`,
+      409
+    );
   }
 
   const id = buildId("EVP");
@@ -1552,31 +1582,60 @@ async function updateEvaluationPeriod(id, payload = {}, executor = query) {
     throw createHttpError("start_date tidak boleh lebih besar dari end_date.", 400);
   }
 
-  if (payload.startDate || payload.start_date) {
-    const targetMonth = startDate.slice(0, 7);
-    const duplicateRes = await runQuery(
-      executor,
-      `
-      SELECT id, title, type
-      FROM evaluation_periods
-      WHERE type = $1 AND TO_CHAR(start_date, 'YYYY-MM') = $2 AND id != $3
-      LIMIT 1
-      `,
-      [period.type, targetMonth, id]
-    );
-    if (duplicateRes.rowCount > 0) {
-      throw createHttpError(
-        `Periode evaluasi jenis ${period.type} untuk bulan ${targetMonth} sudah ada (${duplicateRes.rows[0].title}). Dalam 1 bulan hanya diperbolehkan 1 ${period.type}.`,
-        409
-      );
-    }
-  }
-
   const groupId = payload.groupId !== undefined ? (payload.groupId || null) : (payload.group_id !== undefined ? (payload.group_id || null) : period.group_id);
   if (groupId && groupId !== period.group_id) {
     const gCheck = await runQuery(executor, "SELECT id FROM evaluation_groups WHERE id = $1", [groupId]);
     if (gCheck.rowCount === 0) {
       throw createHttpError("Kelompok evaluasi tidak ditemukan.", 404);
+    }
+  }
+
+  if (payload.startDate || payload.start_date || payload.groupId !== undefined || payload.group_id !== undefined) {
+    const targetMonth = startDate.slice(0, 7);
+    let duplicateRes;
+    if (period.type === "PM_EVALUATION") {
+      if (groupId) {
+        duplicateRes = await runQuery(
+          executor,
+          `
+          SELECT id, title, type
+          FROM evaluation_periods
+          WHERE type = $1 AND TO_CHAR(start_date, 'YYYY-MM') = $2 AND group_id = $3 AND id != $4
+          LIMIT 1
+          `,
+          [period.type, targetMonth, groupId, id]
+        );
+      } else {
+        duplicateRes = await runQuery(
+          executor,
+          `
+          SELECT id, title, type
+          FROM evaluation_periods
+          WHERE type = $1 AND TO_CHAR(start_date, 'YYYY-MM') = $2 AND group_id IS NULL AND id != $3
+          LIMIT 1
+          `,
+          [period.type, targetMonth, id]
+        );
+      }
+    } else {
+      duplicateRes = await runQuery(
+        executor,
+        `
+        SELECT id, title, type
+        FROM evaluation_periods
+        WHERE type = $1 AND TO_CHAR(start_date, 'YYYY-MM') = $2 AND id != $3
+        LIMIT 1
+        `,
+        [period.type, targetMonth, id]
+      );
+    }
+
+    if (duplicateRes.rowCount > 0) {
+      const groupNotice = groupId ? " untuk kelompok ini" : "";
+      throw createHttpError(
+        `Periode evaluasi jenis ${period.type}${groupNotice} untuk bulan ${targetMonth} sudah ada (${duplicateRes.rows[0].title}). Dalam 1 bulan hanya diperbolehkan 1 periode per kelompok evaluasi.`,
+        409
+      );
     }
   }
 

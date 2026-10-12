@@ -593,6 +593,49 @@ test("Validation rejects duplicate PM_EVALUATION or MONTHLY_PRESENTATION in same
   );
 });
 
+test("Multi-Group PM_EVALUATION: different groups (Software & Hardware) allowed in same month, duplicate in same group rejected", () => {
+  const existingPeriods = [
+    { id: "EVP-1", type: "PM_EVALUATION", groupId: "GRP-SOFTWARE", startDate: "2026-10-01", title: "Evaluasi PM Software Oktober" },
+  ];
+
+  function validateGroupDuplicate(newPeriod, existing) {
+    const newMonth = newPeriod.startDate.slice(0, 7);
+    const conflict = existing.find((p) => {
+      if (p.type !== newPeriod.type) return false;
+      if (p.startDate.slice(0, 7) !== newMonth) return false;
+      if (p.id === newPeriod.id) return false;
+      if (newPeriod.type === "PM_EVALUATION") {
+        return (p.groupId || null) === (newPeriod.groupId || null);
+      }
+      return true;
+    });
+    if (conflict) {
+      const err = new Error(`Periode evaluasi jenis ${newPeriod.type} untuk kelompok ini pada bulan ${newMonth} sudah ada.`);
+      err.statusCode = 409;
+      throw err;
+    }
+    return true;
+  }
+
+  // Same month, DIFFERENT group (Hardware) -> ALLOWED!
+  assert.doesNotThrow(() =>
+    validateGroupDuplicate(
+      { id: "EVP-HARDWARE", type: "PM_EVALUATION", groupId: "GRP-HARDWARE", startDate: "2026-10-01", title: "Evaluasi PM Hardware Oktober" },
+      existingPeriods
+    )
+  );
+
+  // Same month, SAME group (Software duplicate) -> REJECT 409!
+  assert.throws(
+    () =>
+      validateGroupDuplicate(
+        { id: "EVP-DUP", type: "PM_EVALUATION", groupId: "GRP-SOFTWARE", startDate: "2026-10-15", title: "Evaluasi PM Software Batch 2" },
+        existingPeriods
+      ),
+    /already exists|sudah ada/i
+  );
+});
+
 // ---------------------------------------------------------------------------
 // 9. Cross-Project Evaluation Groups, Multi-PM, Attendance & Aggregation
 // ---------------------------------------------------------------------------
