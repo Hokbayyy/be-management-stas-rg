@@ -64,44 +64,8 @@ Catatan file upload:
    - `npm run db:migrate`
   - `npm run db:seed` (opsional, saat ini tidak mengisi data dummy)
   - `npm run db:clear` (opsional, hapus semua data untuk mulai dari kosong)
-   - `npm run dev`
+   - `npm run dev'
 
-### Setup database via Docker
-Jika ingin cepat menjalankan PostgreSQL lokal, gunakan compose di folder backend:
-
-1. Jalankan container DB:
-  - `docker compose up -d`
-2. Pastikan `.env` backend memakai nilai default berikut (sesuai compose):
-  - `DB_HOST=localhost`
-  - `DB_PORT=55432`
-  - `DB_NAME=stasrg`
-  - `DB_USER=postgres`
-  - `DB_PASSWORD=postgres`
-3. Inisialisasi schema + seed:
-  - `npm run db:migrate`
-  - `npm run db:seed`
-4. Jalankan backend:
-  - `npm run dev`
-
-Perintah bantu:
-- Stop DB: `docker compose down`
-- Stop + hapus data volume: `docker compose down -v`
-
-## 4.1) TAH SETUP ENV PRODUCTION
-1. Copy template:
-   - Linux/macOS: `cp .env.production.example .env.production`
-   - Windows PowerShell: `Copy-Item .env.production.example .env.production`
-2. Isi nilai production:
-   - `CORS_ORIGIN` => domain frontend production (contoh: `https://app.stasrg.ac.id`)
-   - `DATABASE_URL` => koneksi PostgreSQL production
-   - `COOKIE_SAMESITE` => gunakan `none` jika frontend dan API beda site/domain; browser membutuhkan HTTPS untuk mode ini
-   - `COOKIE_DOMAIN` => opsional, hanya jika cookie perlu berlaku untuk beberapa subdomain dalam satu parent domain
-3. Jalankan backend dengan mode production:
-   - `NODE_ENV=production npm start`
-
-Catatan:
-- Saat `NODE_ENV=production`, backend akan membaca `.env` lalu override dengan `.env.production`.
-- Simpan rahasia production di environment server (secret manager) dan jangan commit `.env.production` berisi kredensial nyata.
 
 ## 5) JENG PENERUS IEU
 - Jangan tulis query SQL langsung berulang di banyak route; gunakan helper di `utils/`.
