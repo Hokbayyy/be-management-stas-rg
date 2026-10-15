@@ -895,6 +895,7 @@ CREATE TABLE IF NOT EXISTS evaluation_periods (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
   type TEXT NOT NULL CHECK (type IN ('PM_EVALUATION', 'MONTHLY_PRESENTATION')),
+  scoring_version TEXT CHECK (scoring_version IN ('PM_V1_7CRITERIA', 'PM_V2_KSA', 'PRESENTATION_V1_7CRITERIA', 'PRESENTATION_V2_KSA')),
   status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT', 'OPEN', 'CLOSED')),
   start_date DATE NOT NULL,
   end_date DATE NOT NULL,
@@ -912,16 +913,18 @@ CREATE INDEX IF NOT EXISTS idx_evaluation_periods_dates ON evaluation_periods(st
 CREATE TABLE IF NOT EXISTS evaluation_criteria (
   id TEXT PRIMARY KEY,
   period_type TEXT NOT NULL CHECK (period_type IN ('PM_EVALUATION', 'MONTHLY_PRESENTATION')),
+  scoring_version TEXT CHECK (scoring_version IN ('PM_V1_7CRITERIA', 'PM_V2_KSA', 'PRESENTATION_V1_7CRITERIA', 'PRESENTATION_V2_KSA')),
   key TEXT NOT NULL,
   name TEXT NOT NULL,
   description TEXT,
+  weight DOUBLE PRECISION NOT NULL DEFAULT 1.0,
   sort_order INTEGER NOT NULL DEFAULT 0,
   min_score NUMERIC(4, 2) NOT NULL DEFAULT 1.0,
   max_score NUMERIC(4, 2) NOT NULL DEFAULT 10.0,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (period_type, key)
+  UNIQUE (scoring_version, key)
 );
 CREATE INDEX IF NOT EXISTS idx_evaluation_criteria_type_sort ON evaluation_criteria(period_type, sort_order ASC);
 
@@ -1091,5 +1094,44 @@ ALTER TABLE research_divisions
 
 ALTER TABLE research_memberships
   ADD COLUMN IF NOT EXISTS division_id TEXT REFERENCES research_divisions(id) ON DELETE SET NULL;
+
+-- 15. evaluation_emergency_audits
+CREATE TABLE IF NOT EXISTS evaluation_emergency_audits (
+  id TEXT PRIMARY KEY,
+  period_id TEXT NOT NULL,
+  period_title TEXT NOT NULL,
+  period_type TEXT NOT NULL,
+  period_status_before TEXT NOT NULL,
+  actor_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  actor_name TEXT,
+  actor_role TEXT,
+  action_type TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  affected_records_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+  execution_status TEXT NOT NULL CHECK (execution_status IN ('SUCCESS', 'FAILURE')),
+  error_message TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_evaluation_emergency_audits_period ON evaluation_emergency_audits(period_id);
+CREATE INDEX IF NOT EXISTS idx_evaluation_emergency_audits_actor ON evaluation_emergency_audits(actor_id);
+CREATE INDEX IF NOT EXISTS idx_evaluation_emergency_audits_created ON evaluation_emergency_audits(created_at);
+
+-- 16. evaluation_monitoring_grants
+CREATE TABLE IF NOT EXISTS evaluation_monitoring_grants (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  period_id TEXT REFERENCES evaluation_periods(id) ON DELETE CASCADE,
+  group_id TEXT REFERENCES evaluation_groups(id) ON DELETE CASCADE,
+  granted_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  reason TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  revoked_at TIMESTAMPTZ,
+  revoked_by TEXT REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_evaluation_monitoring_grants_user ON evaluation_monitoring_grants(user_id);
+CREATE INDEX IF NOT EXISTS idx_evaluation_monitoring_grants_period ON evaluation_monitoring_grants(period_id);
+CREATE INDEX IF NOT EXISTS idx_evaluation_monitoring_grants_group ON evaluation_monitoring_grants(group_id);
+CREATE INDEX IF NOT EXISTS idx_evaluation_monitoring_grants_active ON evaluation_monitoring_grants(is_active);
 
 COMMIT;

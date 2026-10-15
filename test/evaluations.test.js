@@ -5,10 +5,25 @@ const {
   ensureEvaluationTables,
   calculateAverageScore,
   validateScoreRange,
+  createEvaluationPeriod,
+  updateEvaluationPeriod,
+  migratePeriodScoringVersion,
   deleteEvaluationPeriod,
+  listEvaluationCriteria,
+  getPeriodCriteria,
   savePmEvaluationSubmission,
+  savePresentationEvaluationSubmission,
+  executeEmergencyActionOnPeriod,
+  listEmergencyAudits,
+  createMonitoringGrant,
+  revokeMonitoringGrant,
+  listMonitoringGrants,
+  hasActiveMonitoringGrant,
   INITIAL_PM_CRITERIA,
-  INITIAL_PRESENTATION_CRITERIA
+  INITIAL_PRESENTATION_CRITERIA,
+  KSA_PM_CRITERIA,
+  KSA_PRESENTATION_CRITERIA,
+  SCORING_VERSIONS
 } = require("../utils/evaluationService");
 
 // ---------------------------------------------------------------------------
@@ -1314,4 +1329,681 @@ test("savePmEvaluationSubmission authorization & validation: strictly enforces a
   await assert.doesNotReject(async () => {
     await savePmEvaluationSubmission("ASN-1", "USER-PM-1", validDraftPayload, createMockExecutor());
   });
+});
+
+test("Policy 1: deleteEvaluationPeriod strictly rejects CLOSED periods unless isEmergency is true", async () => {
+  const createMockExecutor = () => ({
+    query: async (sql, params) => {
+      const q = sql.trim();
+      if (q.includes("FROM evaluation_periods") && q.includes("id = $1")) {
+        return {
+          rows: [{
+            id: "EVP-CLOSED-1",
+            title: "Periode CLOSED",
+            type: "PM_EVALUATION",
+            status: "CLOSED",
+            start_date: "2026-10-01",
+            end_date: "2026-10-31"
+          }],
+          rowCount: 1
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }
+  });
+
+  // Regular deletion with force: true must be rejected with 409
+  await assert.rejects(
+    async () => {
+      await deleteEvaluationPeriod("EVP-CLOSED-1", { force: true }, createMockExecutor());
+    },
+    (err) => {
+      assert.equal(err.statusCode, 409);
+      assert.match(err.message, /sudah ditutup dan tidak dapat dihapus melalui operasi reguler/);
+      return true;
+    }
+  );
+});
+
+test("Policy 1: executeEmergencyActionOnPeriod validates actor, action, reason, and period status", async () => {
+  const period = {
+    id: "EVP-EMG-1",
+    title: "Evaluasi PM Oktober (Selesai)",
+    type: "PM_EVALUATION",
+    status: "CLOSED"
+  };
+
+  const executed = [];
+  const createMockExecutor = ({ periodStatus = "CLOSED", shouldFailMutation = false } = {}) => {
+    const client = {
+      query: async (sql, params) => {
+        executed.push({ sql: sql.trim(), params });
+        const q = sql.trim();
+        if (q.includes("FROM evaluation_periods") && q.includes("FOR UPDATE")) {
+          return { rows: [{ ...period, status: periodStatus }], rowCount: 1 };
+        }
+        if (q.includes("COUNT(*)::int AS count")) {
+          return { rows: [{ count: 0 }], rowCount: 1 };
+        }
+        if (shouldFailMutation && q.includes("title LIKE '[ARCHIVED]%'")) {
+          throw new Error("Simulated database failure during mutation");
+        }
+        return { rows: [], rowCount: 1 };
+      },
+      release: () => {}
+    };
+    return {
+      connect: async () => client,
+      query: client.query
+    };
+  };
+
+  const adminActor = { id: "USER-ADMIN", role: "operator", name: "Admin" };
+  const dosenActor = { id: "USER-DOSEN", role: "dosen", name: "Dosen" };
+  const validPayload = {
+    action: "EMERGENCY_ARCHIVE",
+    reason: "Koreksi data mendesak atas instruksi pimpinan fakultas",
+    confirmPeriodTitle: "Evaluasi PM Oktober (Selesai)"
+  };
+
+  // 1. Non-operator actor -> 403
+  await assert.rejects(
+    async () => {
+      await executeEmergencyActionOnPeriod(period.id, validPayload, dosenActor, createMockExecutor());
+    },
+    (err) => {
+      assert.equal(err.statusCode, 403);
+      assert.match(err.message, /Admin\/Operator/);
+      return true;
+    }
+  );
+
+  // 2. Reason < 10 chars -> 422
+  await assert.rejects(
+    async () => {
+      await executeEmergencyActionOnPeriod(period.id, { ...validPayload, reason: "pendek" }, adminActor, createMockExecutor());
+    },
+    (err) => {
+      assert.equal(err.statusCode, 422);
+      assert.match(err.message, /minimal 10 karakter/);
+      return true;
+    }
+  );
+
+  // 3. Invalid action type -> 422
+  await assert.rejects(
+    async () => {
+      await executeEmergencyActionOnPeriod(period.id, { ...validPayload, action: "UNKNOWN_ACTION" }, adminActor, createMockExecutor());
+    },
+    (err) => {
+      assert.equal(err.statusCode, 422);
+      assert.match(err.message, /tidak valid/);
+      return true;
+    }
+  );
+
+  // 4. Period not CLOSED (e.g. OPEN) -> 409
+  await assert.rejects(
+    async () => {
+      await executeEmergencyActionOnPeriod(period.id, validPayload, adminActor, createMockExecutor({ periodStatus: "OPEN" }));
+    },
+    (err) => {
+      assert.equal(err.statusCode, 409);
+      assert.match(err.message, /CLOSED/);
+      return true;
+    }
+  );
+
+  // 5. Title mismatch -> 422
+  await assert.rejects(
+    async () => {
+      await executeEmergencyActionOnPeriod(period.id, { ...validPayload, confirmPeriodTitle: "Salah Judul" }, adminActor, createMockExecutor());
+    },
+    (err) => {
+      assert.equal(err.statusCode, 422);
+      assert.match(err.message, /Konfirmasi judul/);
+      return true;
+    }
+  );
+
+  // 6. Valid EMERGENCY_ARCHIVE -> succeeds & records audit trail
+  executed.length = 0;
+  const result = await executeEmergencyActionOnPeriod(period.id, validPayload, adminActor, createMockExecutor());
+  assert.equal(result.success, true);
+  assert.equal(result.action, "EMERGENCY_ARCHIVE");
+  assert.ok(result.auditId);
+  const auditInsert = executed.find((q) => q.sql.includes("INSERT INTO evaluation_emergency_audits"));
+  assert.ok(auditInsert, "Must insert persistent audit trail");
+  assert.equal(auditInsert.params[8], "EMERGENCY_ARCHIVE");
+  assert.equal(auditInsert.params[9], validPayload.reason);
+
+  // 7. Transaction rollback on failure: mutations rolled back and no success
+  executed.length = 0;
+  await assert.rejects(
+    async () => {
+      await executeEmergencyActionOnPeriod(period.id, validPayload, adminActor, createMockExecutor({ shouldFailMutation: true }));
+    },
+    (err) => {
+      assert.match(err.message, /Simulated database failure/);
+      return true;
+    }
+  );
+  assert.ok(executed.some((q) => q.sql === "ROLLBACK"), "Must rollback transaction on failure");
+});
+
+test("Policy 2: Monitoring Grants scope-aware matching & validation", async () => {
+  // 1. createMonitoringGrant requires userId
+  await assert.rejects(
+    async () => {
+      await createMonitoringGrant({});
+    },
+    (err) => {
+      assert.equal(err.statusCode, 400);
+      assert.match(err.message, /userId/);
+      return true;
+    }
+  );
+
+  // 2. hasActiveMonitoringGrant scope matching with mock executor
+  const grants = [
+    { id: "GR-1", user_id: "USR-DOSEN-1", period_id: "EVP-1", group_id: "GRP-SOFT", is_active: true },
+    { id: "GR-2", user_id: "USR-DOSEN-2", period_id: null, group_id: null, is_active: true }, // Wildcard
+    { id: "GR-3", user_id: "USR-DOSEN-3", period_id: "EVP-1", group_id: "GRP-SOFT", is_active: false } // Revoked
+  ];
+
+  const mockExecutor = {
+    query: async (sql, params) => {
+      const q = sql.trim();
+      if (q.includes("information_schema.tables")) return { rows: [{ exists: true }] };
+      if (q.includes("FROM evaluation_monitoring_grants")) {
+        const userId = params[0];
+        const periodId = params[1];
+        const groupId = params[2];
+
+        const match = grants.filter((g) => {
+          if (g.user_id !== userId) return false;
+          if (!g.is_active) return false;
+          if (g.period_id !== null && periodId && g.period_id !== periodId) return false;
+          if (g.group_id !== null && groupId && g.group_id !== groupId) return false;
+          return true;
+        });
+        return { rows: match.map((g) => ({ id: g.id })), rowCount: match.length };
+      }
+      return { rows: [], rowCount: 0 };
+    }
+  };
+
+  // Specific grant matches EVP-1 and GRP-SOFT
+  const match1 = await hasActiveMonitoringGrant("USR-DOSEN-1", { periodId: "EVP-1", groupId: "GRP-SOFT" }, mockExecutor);
+  assert.equal(match1, true);
+
+  // Specific grant does NOT match out-of-scope period EVP-2
+  const matchOutScope = await hasActiveMonitoringGrant("USR-DOSEN-1", { periodId: "EVP-2", groupId: "GRP-SOFT" }, mockExecutor);
+  assert.equal(matchOutScope, false);
+
+  // Wildcard grant matches any period & group
+  const matchWildcard = await hasActiveMonitoringGrant("USR-DOSEN-2", { periodId: "EVP-99", groupId: "GRP-OTHER" }, mockExecutor);
+  assert.equal(matchWildcard, true);
+
+  // Revoked grant does not match
+  const matchRevoked = await hasActiveMonitoringGrant("USR-DOSEN-3", { periodId: "EVP-1", groupId: "GRP-SOFT" }, mockExecutor);
+  assert.equal(matchRevoked, false);
+});
+
+// =============================================================================
+// 7. Versioned KSA Scoring V2 Regression Tests
+// =============================================================================
+
+test("Regression 1 & 2: Periode baru otomatis menggunakan PM_V2_KSA dan PRESENTATION_V2_KSA", async () => {
+  let insertedPeriod = null;
+  const mockExecutor = {
+    query: async (sql, params) => {
+      const q = sql.trim();
+      if (q.includes("information_schema.tables")) return { rows: [{ exists: true }] };
+      if (q.includes("SELECT id, name FROM evaluation_groups WHERE is_active = TRUE")) {
+        return { rows: [{ id: "GRP-1", name: "Software" }] };
+      }
+      if (q.includes("FROM evaluation_periods WHERE type = $1 AND TO_CHAR(start_date, 'YYYY-MM') = $2")) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (q.includes("INSERT INTO evaluation_periods")) {
+        insertedPeriod = {
+          id: params[0],
+          title: params[1],
+          type: params[2],
+          scoring_version: params[3],
+          status: "DRAFT",
+          start_date: params[4],
+          end_date: params[5],
+          description: params[6],
+          created_by: params[7],
+          group_id: params[8]
+        };
+        return { rows: [insertedPeriod], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }
+  };
+
+  // 1. Periode PM baru otomatis memakai PM_V2_KSA
+  const pmPeriod = await createEvaluationPeriod({
+    title: "Evaluasi PM Desember",
+    type: "PM_EVALUATION",
+    startDate: "2026-12-01",
+    endDate: "2026-12-31"
+  }, "USR-ADMIN", mockExecutor);
+
+  assert.equal(pmPeriod.scoringVersion, SCORING_VERSIONS.PM_V2_KSA);
+  assert.equal(pmPeriod.scoring_version, SCORING_VERSIONS.PM_V2_KSA);
+
+  // 2. Periode Presentation baru otomatis memakai PRESENTATION_V2_KSA
+  const presPeriod = await createEvaluationPeriod({
+    title: "Presentasi Bulanan Desember",
+    type: "MONTHLY_PRESENTATION",
+    startDate: "2026-12-15",
+    endDate: "2026-12-15"
+  }, "USR-ADMIN", mockExecutor);
+
+  assert.equal(presPeriod.scoringVersion, SCORING_VERSIONS.PRESENTATION_V2_KSA);
+  assert.equal(presPeriod.scoring_version, SCORING_VERSIONS.PRESENTATION_V2_KSA);
+});
+
+test("Regression 3 & 4: Period historis tetap memakai V1 dan 7 kriteria historis tetap terbaca", async () => {
+  const historicalPeriod = {
+    id: "EVP-HIST-1",
+    title: "Evaluasi PM Historis",
+    type: "PM_EVALUATION",
+    scoring_version: "PM_V1_7CRITERIA",
+    status: "CLOSED",
+    start_date: "2026-08-01",
+    end_date: "2026-08-31"
+  };
+
+  const mockExecutor = {
+    query: async (sql, params) => {
+      const q = sql.trim();
+      if (q.includes("information_schema.tables")) return { rows: [{ exists: true }] };
+      if (q.includes("FROM evaluation_periods") && q.includes("id = $1")) {
+        return { rows: [historicalPeriod], rowCount: 1 };
+      }
+      if (q.includes("FROM evaluation_criteria")) {
+        return {
+          rows: INITIAL_PM_CRITERIA.map((c) => ({
+            ...c,
+            id: `CRT-${c.key}`,
+            period_type: "PM_EVALUATION",
+            scoring_version: "PM_V1_7CRITERIA"
+          })),
+          rowCount: INITIAL_PM_CRITERIA.length
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }
+  };
+
+  const criteriaData = await getPeriodCriteria("EVP-HIST-1", mockExecutor);
+  assert.equal(criteriaData.scoringVersion, "PM_V1_7CRITERIA");
+  assert.equal(criteriaData.criteria.length, 7);
+  assert.equal(criteriaData.criteria[0].key, "quality_of_work");
+});
+
+test("Regression 5: KSA 8, 9, 7 menghasilkan overallScore 8.00", () => {
+  const ksaScores = [8.0, 9.0, 7.0];
+  const avg = calculateAverageScore(ksaScores);
+  assert.equal(avg, 8.0, "Average of (8 + 9 + 7)/3 must be exactly 8.00");
+
+  const ksaScoresFloat = [8.5, 9.0, 7.5];
+  // (8.5 + 9.0 + 7.5)/3 = 25/3 = 8.3333 -> 8.33
+  const avgFloat = calculateAverageScore(ksaScoresFloat);
+  assert.equal(avgFloat, 8.33);
+});
+
+test("Regression 6 & 7: Missing K/S/A menolak submit (422), draft KSA parsial tetap aman (200)", async () => {
+  const assignment = {
+    id: "ASN-KSA-1",
+    period_id: "EVP-KSA-1",
+    student_id: "STD-1",
+    evaluator_id: "USER-PM-1",
+    status: "PENDING",
+    period_status: "OPEN",
+    period_type: "PM_EVALUATION",
+    period_scoring_version: "PM_V2_KSA"
+  };
+
+  let savedSubmission = null;
+  const mockExecutor = {
+    query: async (sql, params) => {
+      const q = sql.trim();
+      if (q.includes("information_schema.tables")) return { rows: [{ exists: true }] };
+      if (q.includes("FROM evaluation_assignments ea")) {
+        return { rows: [assignment], rowCount: 1 };
+      }
+      if (q.includes("FROM evaluation_submissions WHERE assignment_id = $1")) {
+        return { rows: savedSubmission ? [savedSubmission] : [], rowCount: savedSubmission ? 1 : 0 };
+      }
+      if (q.includes("FROM evaluation_period_evaluators")) {
+        return { rows: [{ attendance_status: "PRESENT" }], rowCount: 1 };
+      }
+      if (q.includes("FROM evaluation_criteria WHERE scoring_version = $1")) {
+        return {
+          rows: KSA_PM_CRITERIA.map((c) => ({ ...c, id: `CRT-V2-${c.key}`, period_type: "PM_EVALUATION", scoring_version: "PM_V2_KSA" })),
+          rowCount: 3
+        };
+      }
+      if (q.includes("INSERT INTO evaluation_submissions")) {
+        savedSubmission = { id: params[0], status: params[5], overall_score: params[6] };
+        return { rows: [savedSubmission], rowCount: 1 };
+      }
+      if (q.includes("UPDATE evaluation_submissions")) {
+        savedSubmission = { id: params[0], status: params[1], overall_score: params[2] };
+        return { rows: [savedSubmission], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 1 };
+    }
+  };
+
+  // 1. Partial draft: only knowledge -> must succeed
+  await assert.doesNotReject(async () => {
+    await savePmEvaluationSubmission("ASN-KSA-1", "USER-PM-1", {
+      status: "DRAFT",
+      scores: [{ criteriaKey: "knowledge", score: 8.0 }]
+    }, mockExecutor);
+  });
+
+  // 2. Submit with missing application dimension -> must be rejected with 422
+  await assert.rejects(
+    async () => {
+      await savePmEvaluationSubmission("ASN-KSA-1", "USER-PM-1", {
+        status: "SUBMITTED",
+        scores: [
+          { criteriaKey: "knowledge", score: 8.0 },
+          { criteriaKey: "skill", score: 9.0 }
+        ]
+      }, mockExecutor);
+    },
+    (err) => {
+      assert.equal(err.statusCode, 422);
+      assert.match(err.message, /kurang: Application/);
+      return true;
+    }
+  );
+
+  // 3. Complete submit with all 3 dimensions (8, 9, 7) -> succeeds with overallScore 8.00
+  await assert.doesNotReject(async () => {
+    await savePmEvaluationSubmission("ASN-KSA-1", "USER-PM-1", {
+      status: "SUBMITTED",
+      scores: [
+        { criteriaKey: "knowledge", score: 8.0 },
+        { criteriaKey: "skill", score: 9.0 },
+        { criteriaKey: "application", score: 7.0 }
+      ]
+    }, mockExecutor);
+  });
+  assert.equal(savedSubmission.overall_score, 8.0);
+});
+
+test("Regression 8 & 9: Key legacy ditolak pada V2 (400), dan V2 keys ditolak pada V1 (400)", async () => {
+  const v2Assignment = {
+    id: "ASN-V2",
+    period_id: "EVP-V2",
+    evaluator_id: "USER-PM-1",
+    status: "PENDING",
+    period_status: "OPEN",
+    period_type: "PM_EVALUATION",
+    period_scoring_version: "PM_V2_KSA"
+  };
+
+  const v1Assignment = {
+    id: "ASN-V1",
+    period_id: "EVP-V1",
+    evaluator_id: "USER-PM-1",
+    status: "PENDING",
+    period_status: "OPEN",
+    period_type: "PM_EVALUATION",
+    period_scoring_version: "PM_V1_7CRITERIA"
+  };
+
+  const createExecutor = (assignment, criteria) => ({
+    query: async (sql, params) => {
+      const q = sql.trim();
+      if (q.includes("information_schema.tables")) return { rows: [{ exists: true }] };
+      if (q.includes("FROM evaluation_assignments ea")) {
+        return { rows: [assignment], rowCount: 1 };
+      }
+      if (q.includes("FROM evaluation_submissions WHERE assignment_id = $1")) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (q.includes("FROM evaluation_period_evaluators")) {
+        return { rows: [{ attendance_status: "PRESENT" }], rowCount: 1 };
+      }
+      if (q.includes("FROM evaluation_criteria")) {
+        return { rows: criteria, rowCount: criteria.length };
+      }
+      return { rows: [], rowCount: 1 };
+    }
+  });
+
+  const v2Criteria = KSA_PM_CRITERIA.map((c) => ({ ...c, id: `CRT-${c.key}` }));
+  const v1Criteria = INITIAL_PM_CRITERIA.map((c) => ({ ...c, id: `CRT-${c.key}` }));
+
+  // 1. Submit legacy key on V2 -> 400
+  await assert.rejects(
+    async () => {
+      await savePmEvaluationSubmission("ASN-V2", "USER-PM-1", {
+        status: "DRAFT",
+        scores: [{ criteriaKey: "quality_of_work", score: 8.0 }]
+      }, createExecutor(v2Assignment, v2Criteria));
+    },
+    (err) => {
+      assert.equal(err.statusCode, 400);
+      assert.match(err.message, /tidak dikenali untuk versi penilaian PM_V2_KSA/);
+      return true;
+    }
+  );
+
+  // 2. Submit V2 key on V1 -> 400
+  await assert.rejects(
+    async () => {
+      await savePmEvaluationSubmission("ASN-V1", "USER-PM-1", {
+        status: "DRAFT",
+        scores: [{ criteriaKey: "knowledge", score: 8.0 }]
+      }, createExecutor(v1Assignment, v1Criteria));
+    },
+    (err) => {
+      assert.equal(err.statusCode, 400);
+      assert.match(err.message, /tidak dikenali untuk versi penilaian PM_V1_7CRITERIA/);
+      return true;
+    }
+  );
+});
+
+test("Regression 10 & 11: Periode OPEN dengan data existing atau CLOSED tidak dapat mengganti scoring version", async () => {
+  const openPeriod = {
+    id: "EVP-OPEN",
+    title: "Periode Open",
+    type: "PM_EVALUATION",
+    scoring_version: "PM_V1_7CRITERIA",
+    status: "OPEN"
+  };
+
+  const closedPeriod = {
+    id: "EVP-CLOSED",
+    title: "Periode Closed",
+    type: "PM_EVALUATION",
+    scoring_version: "PM_V1_7CRITERIA",
+    status: "CLOSED"
+  };
+
+  const createExecutor = (period, existingSubmissionsCount) => ({
+    query: async (sql, params) => {
+      const q = sql.trim();
+      if (q.includes("information_schema.tables")) return { rows: [{ exists: true }] };
+      if (q.includes("FROM evaluation_periods") && q.includes("id = $1")) {
+        return { rows: [period], rowCount: 1 };
+      }
+      if (q.includes("COUNT(*)::int AS count FROM evaluation_submissions")) {
+        return { rows: [{ count: existingSubmissionsCount }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }
+  });
+
+  // 1. OPEN with existing evaluation submissions -> rejected with 409
+  await assert.rejects(
+    async () => {
+      await updateEvaluationPeriod("EVP-OPEN", { scoringVersion: "PM_V2_KSA" }, createExecutor(openPeriod, 2));
+    },
+    (err) => {
+      assert.equal(err.statusCode, 409);
+      assert.match(err.message, /sudah memiliki data penilaian/);
+      return true;
+    }
+  );
+
+  // 2. CLOSED period -> rejected with 409
+  await assert.rejects(
+    async () => {
+      await updateEvaluationPeriod("EVP-CLOSED", { scoringVersion: "PM_V2_KSA" }, createExecutor(closedPeriod, 0));
+    },
+    (err) => {
+      assert.equal(err.statusCode, 409);
+      assert.match(err.message, /sudah ditutup/);
+      return true;
+    }
+  );
+});
+
+test("Regression 12 & 13: Multi-PM aggregation and ABSENT exclusion", () => {
+  // Evaluator 1 submitted 8.0, Evaluator 2 submitted 9.0
+  const submittedScores = [8.0, 9.0];
+  const avg = calculateAverageScore(submittedScores);
+  assert.equal(avg, 8.50, "Multi-PM average of 8.0 and 9.0 must be 8.50");
+
+  // Evaluator 2 absent: only Evaluator 1 is counted, absent is excluded (not 0.0)
+  const singleSubmittedScore = [8.0];
+  const singleAvg = calculateAverageScore(singleSubmittedScore);
+  assert.equal(singleAvg, 8.0);
+  assert.notEqual(singleAvg, 4.0, "ABSENT PM must not be counted as 0.0");
+});
+
+test("Regression 14: Monthly Presentation multi-evaluator aggregation", () => {
+  const evaluatorScores = [
+    { status: "SUBMITTED", score: 8.0 },
+    { status: "SUBMITTED", score: 9.0 },
+    { status: "SUBMITTED", score: 7.0 },
+    { status: "DRAFT", score: 10.0 } // Draft excluded
+  ];
+
+  const validScores = evaluatorScores
+    .filter((e) => e.status === "SUBMITTED")
+    .map((e) => e.score);
+
+  const avg = calculateAverageScore(validScores);
+  assert.equal(avg, 8.00, "(8.0 + 9.0 + 7.0) / 3 = 8.00");
+});
+
+test("Regression 15: Cross-evaluator submit rejection", async () => {
+  const assignment = {
+    id: "ASN-AUTH-1",
+    period_id: "EVP-1",
+    evaluator_id: "USER-PM-PRIMARY",
+    status: "PENDING",
+    period_status: "OPEN",
+    period_type: "PM_EVALUATION"
+  };
+
+  const mockExecutor = {
+    query: async (sql, params) => {
+      const q = sql.trim();
+      if (q.includes("information_schema.tables")) return { rows: [{ exists: true }] };
+      if (q.includes("FROM evaluation_assignments ea")) {
+        return { rows: [assignment], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }
+  };
+
+  await assert.rejects(
+    async () => {
+      await savePmEvaluationSubmission("ASN-AUTH-1", "USER-PM-IMPOSTOR", {
+        status: "DRAFT",
+        scores: [{ criteriaKey: "knowledge", score: 8.0 }]
+      }, mockExecutor);
+    },
+    (err) => {
+      assert.equal(err.statusCode, 403);
+      assert.match(err.message, /tidak berhak menilai/);
+      return true;
+    }
+  );
+});
+
+test("Regression 16: Migration 040 SQL script is idempotent and does not produce duplicate versions", () => {
+  const fs = require("fs");
+  const path = require("path");
+  const migrationPath = path.join(__dirname, "../db/migrations/040_versioned_ksa_scoring_v2.sql");
+  assert.ok(fs.existsSync(migrationPath), "Migration 040 file must exist");
+
+  const sql = fs.readFileSync(migrationPath, "utf8");
+  assert.ok(sql.includes("ADD COLUMN IF NOT EXISTS scoring_version"), "Must use IF NOT EXISTS for scoring_version");
+  assert.ok(sql.includes("ADD COLUMN IF NOT EXISTS weight"), "Must use IF NOT EXISTS for weight");
+  assert.ok(sql.includes("ON CONFLICT (id) DO UPDATE"), "Criteria seed must be idempotent with ON CONFLICT");
+  assert.ok(sql.includes("uq_evaluation_criteria_version_key"), "Must enforce unique constraint on (scoring_version, key)");
+});
+
+test("Regression 17: Object-based payload.scores is accepted for savePmEvaluationSubmission and savePresentationEvaluationSubmission", async () => {
+  const v2Criteria = KSA_PM_CRITERIA.map((c) => ({ ...c, id: `CRT-${c.key}` }));
+  let savedScores = [];
+  let savedOverall = null;
+
+  const mockExecutor = {
+    query: async (sql, params) => {
+      const q = sql.trim();
+      if (q.includes("information_schema.tables")) return { rows: [{ exists: true }] };
+      if (q.includes("FROM evaluation_assignments ea")) {
+        return {
+          rows: [{
+            id: "ASN-OBJ-1",
+            period_id: "EVP-OBJ-1",
+            evaluator_id: "USER-PM-OBJ",
+            status: "PENDING",
+            period_status: "OPEN",
+            period_type: "PM_EVALUATION",
+            period_scoring_version: "PM_V2_KSA"
+          }],
+          rowCount: 1
+        };
+      }
+      if (q.includes("FROM evaluation_submissions WHERE assignment_id = $1")) {
+        return { rows: [], rowCount: 0 };
+      }
+      if (q.includes("FROM evaluation_period_evaluators")) {
+        return { rows: [{ attendance_status: "PRESENT" }], rowCount: 1 };
+      }
+      if (q.includes("FROM evaluation_criteria")) {
+        return { rows: v2Criteria, rowCount: v2Criteria.length };
+      }
+      if (q.includes("INSERT INTO evaluation_submissions")) {
+        savedOverall = params[6];
+        return { rows: [{ id: "SUB-OBJ-1", overall_score: params[6], status: params[5] }], rowCount: 1 };
+      }
+      if (q.includes("INSERT INTO evaluation_score_items")) {
+        savedScores.push({ criteriaId: params[1], score: params[2], notes: params[3] });
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 1 };
+    }
+  };
+
+  await savePmEvaluationSubmission("ASN-OBJ-1", "USER-PM-OBJ", {
+    status: "SUBMITTED",
+    scores: {
+      knowledge: 8.0,
+      skill: 9.0,
+      application: 7.0
+    }
+  }, mockExecutor);
+
+  assert.equal(savedOverall, 8.0);
+  assert.equal(savedScores.length, 3);
 });

@@ -27,24 +27,101 @@ function createHttpError(message, statusCode = 400) {
   return error;
 }
 
+const SCORING_VERSIONS = {
+  PM_V1_7CRITERIA: "PM_V1_7CRITERIA",
+  PM_V2_KSA: "PM_V2_KSA",
+  PRESENTATION_V1_7CRITERIA: "PRESENTATION_V1_7CRITERIA",
+  PRESENTATION_V2_KSA: "PRESENTATION_V2_KSA"
+};
+
+const VALID_PERIOD_VERSIONS = {
+  PM_EVALUATION: [SCORING_VERSIONS.PM_V1_7CRITERIA, SCORING_VERSIONS.PM_V2_KSA],
+  MONTHLY_PRESENTATION: [SCORING_VERSIONS.PRESENTATION_V1_7CRITERIA, SCORING_VERSIONS.PRESENTATION_V2_KSA]
+};
+
+const DEFAULT_SCORING_VERSION = {
+  PM_EVALUATION: SCORING_VERSIONS.PM_V2_KSA,
+  MONTHLY_PRESENTATION: SCORING_VERSIONS.PRESENTATION_V2_KSA
+};
+
 const INITIAL_PM_CRITERIA = [
-  { key: "quality_of_work", name: "Quality of Work", sort_order: 1, min_score: 1.0, max_score: 10.0 },
-  { key: "responsibility", name: "Responsibility", sort_order: 2, min_score: 1.0, max_score: 10.0 },
-  { key: "technical_skill", name: "Technical Skill", sort_order: 3, min_score: 1.0, max_score: 10.0 },
-  { key: "problem_solving", name: "Problem Solving", sort_order: 4, min_score: 1.0, max_score: 10.0 },
-  { key: "collaboration", name: "Collaboration", sort_order: 5, min_score: 1.0, max_score: 10.0 },
-  { key: "initiative", name: "Initiative", sort_order: 6, min_score: 1.0, max_score: 10.0 },
-  { key: "research_contribution", name: "Research Contribution", sort_order: 7, min_score: 1.0, max_score: 10.0 }
+  { key: "quality_of_work", name: "Quality of Work", sort_order: 1, min_score: 1.0, max_score: 10.0, weight: 1.0 / 7.0 },
+  { key: "responsibility", name: "Responsibility", sort_order: 2, min_score: 1.0, max_score: 10.0, weight: 1.0 / 7.0 },
+  { key: "technical_skill", name: "Technical Skill", sort_order: 3, min_score: 1.0, max_score: 10.0, weight: 1.0 / 7.0 },
+  { key: "problem_solving", name: "Problem Solving", sort_order: 4, min_score: 1.0, max_score: 10.0, weight: 1.0 / 7.0 },
+  { key: "collaboration", name: "Collaboration", sort_order: 5, min_score: 1.0, max_score: 10.0, weight: 1.0 / 7.0 },
+  { key: "initiative", name: "Initiative", sort_order: 6, min_score: 1.0, max_score: 10.0, weight: 1.0 / 7.0 },
+  { key: "research_contribution", name: "Research Contribution", sort_order: 7, min_score: 1.0, max_score: 10.0, weight: 1.0 / 7.0 }
 ];
 
 const INITIAL_PRESENTATION_CRITERIA = [
-  { key: "progress_achievement", name: "Progress Achievement", sort_order: 1, min_score: 1.0, max_score: 10.0 },
-  { key: "quality_of_result", name: "Quality of Result", sort_order: 2, min_score: 1.0, max_score: 10.0 },
-  { key: "technical_understanding", name: "Technical Understanding", sort_order: 3, min_score: 1.0, max_score: 10.0 },
-  { key: "problem_solving", name: "Problem Solving", sort_order: 4, min_score: 1.0, max_score: 10.0 },
-  { key: "presentation_delivery", name: "Presentation Delivery", sort_order: 5, min_score: 1.0, max_score: 10.0 },
-  { key: "response_to_questions", name: "Response to Questions", sort_order: 6, min_score: 1.0, max_score: 10.0 },
-  { key: "next_plan", name: "Next Plan", sort_order: 7, min_score: 1.0, max_score: 10.0 }
+  { key: "progress_achievement", name: "Progress Achievement", sort_order: 1, min_score: 1.0, max_score: 10.0, weight: 1.0 / 7.0 },
+  { key: "quality_of_result", name: "Quality of Result", sort_order: 2, min_score: 1.0, max_score: 10.0, weight: 1.0 / 7.0 },
+  { key: "technical_understanding", name: "Technical Understanding", sort_order: 3, min_score: 1.0, max_score: 10.0, weight: 1.0 / 7.0 },
+  { key: "problem_solving", name: "Problem Solving", sort_order: 4, min_score: 1.0, max_score: 10.0, weight: 1.0 / 7.0 },
+  { key: "presentation_delivery", name: "Presentation Delivery", sort_order: 5, min_score: 1.0, max_score: 10.0, weight: 1.0 / 7.0 },
+  { key: "response_to_questions", name: "Response to Questions", sort_order: 6, min_score: 1.0, max_score: 10.0, weight: 1.0 / 7.0 },
+  { key: "next_plan", name: "Next Plan", sort_order: 7, min_score: 1.0, max_score: 10.0, weight: 1.0 / 7.0 }
+];
+
+const KSA_PM_CRITERIA = [
+  {
+    key: "knowledge",
+    name: "Knowledge",
+    sort_order: 1,
+    weight: 1.0 / 3.0,
+    min_score: 1.0,
+    max_score: 10.0,
+    description: "Pemahaman konsep, teknologi, sistem, dan metodologi pekerjaan."
+  },
+  {
+    key: "skill",
+    name: "Skill",
+    sort_order: 2,
+    weight: 1.0 / 3.0,
+    min_score: 1.0,
+    max_score: 10.0,
+    description: "Kemampuan teknis, problem solving, penggunaan tools, serta kualitas pengerjaan."
+  },
+  {
+    key: "application",
+    name: "Application",
+    sort_order: 3,
+    weight: 1.0 / 3.0,
+    min_score: 1.0,
+    max_score: 10.0,
+    description: "Penerapan kemampuan dalam tugas, kualitas deliverable, dan kontribusi nyata terhadap proyek/riset."
+  }
+];
+
+const KSA_PRESENTATION_CRITERIA = [
+  {
+    key: "knowledge",
+    name: "Knowledge",
+    sort_order: 1,
+    weight: 1.0 / 3.0,
+    min_score: 1.0,
+    max_score: 10.0,
+    description: "Penguasaan materi, pemahaman teknis, dan alasan keputusan yang dipresentasikan."
+  },
+  {
+    key: "skill",
+    name: "Skill",
+    sort_order: 2,
+    weight: 1.0 / 3.0,
+    min_score: 1.0,
+    max_score: 10.0,
+    description: "Kemampuan demonstrasi, komunikasi teknis, analisis, dan menjawab pertanyaan."
+  },
+  {
+    key: "application",
+    name: "Application",
+    sort_order: 3,
+    weight: 1.0 / 3.0,
+    min_score: 1.0,
+    max_score: 10.0,
+    description: "Bukti implementasi, hasil pekerjaan/riset, serta relevansi solusi yang dipresentasikan."
+  }
 ];
 
 function validateScoreRange(score) {
@@ -81,9 +158,12 @@ function mapPeriodRow(row) {
   const endDate = formatDateOnly(row.end_date);
   const evaluationMonth = startDate ? startDate.slice(0, 7) : null;
   const type = row.type === "PM_BIWEEKLY" ? "PM_EVALUATION" : row.type;
+  const scoringVersion = row.scoring_version || null;
   return {
     ...row,
     type,
+    scoringVersion,
+    scoring_version: scoringVersion,
     startDate,
     endDate,
     start_date: startDate,
@@ -293,38 +373,55 @@ async function ensureEvaluationTables(executor = query) {
     CREATE TABLE IF NOT EXISTS evaluation_criteria (
       id TEXT PRIMARY KEY,
       period_type TEXT NOT NULL CHECK (period_type IN ('PM_EVALUATION', 'MONTHLY_PRESENTATION')),
+      scoring_version TEXT,
       key TEXT NOT NULL,
       name TEXT NOT NULL,
       description TEXT,
+      weight DOUBLE PRECISION NOT NULL DEFAULT 1.0,
       sort_order INTEGER NOT NULL DEFAULT 0,
       min_score NUMERIC(4, 2) NOT NULL DEFAULT 1.0,
       max_score NUMERIC(4, 2) NOT NULL DEFAULT 10.0,
       is_active BOOLEAN NOT NULL DEFAULT TRUE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (period_type, key)
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
-    INSERT INTO evaluation_criteria (id, period_type, key, name, sort_order, min_score, max_score, is_active)
+    INSERT INTO evaluation_criteria (id, period_type, scoring_version, key, name, description, weight, sort_order, min_score, max_score, is_active)
     VALUES
-      ('CRT-PM-01', 'PM_EVALUATION', 'quality_of_work', 'Quality of Work', 1, 1.0, 10.0, TRUE),
-      ('CRT-PM-02', 'PM_EVALUATION', 'responsibility', 'Responsibility', 2, 1.0, 10.0, TRUE),
-      ('CRT-PM-03', 'PM_EVALUATION', 'technical_skill', 'Technical Skill', 3, 1.0, 10.0, TRUE),
-      ('CRT-PM-04', 'PM_EVALUATION', 'problem_solving', 'Problem Solving', 4, 1.0, 10.0, TRUE),
-      ('CRT-PM-05', 'PM_EVALUATION', 'collaboration', 'Collaboration', 5, 1.0, 10.0, TRUE),
-      ('CRT-PM-06', 'PM_EVALUATION', 'initiative', 'Initiative', 6, 1.0, 10.0, TRUE),
-      ('CRT-PM-07', 'PM_EVALUATION', 'research_contribution', 'Research Contribution', 7, 1.0, 10.0, TRUE),
+      ('CRT-PM-01', 'PM_EVALUATION', 'PM_V1_7CRITERIA', 'quality_of_work', 'Quality of Work', NULL, 1.0/7.0, 1, 1.0, 10.0, TRUE),
+      ('CRT-PM-02', 'PM_EVALUATION', 'PM_V1_7CRITERIA', 'responsibility', 'Responsibility', NULL, 1.0/7.0, 2, 1.0, 10.0, TRUE),
+      ('CRT-PM-03', 'PM_EVALUATION', 'PM_V1_7CRITERIA', 'technical_skill', 'Technical Skill', NULL, 1.0/7.0, 3, 1.0, 10.0, TRUE),
+      ('CRT-PM-04', 'PM_EVALUATION', 'PM_V1_7CRITERIA', 'problem_solving', 'Problem Solving', NULL, 1.0/7.0, 4, 1.0, 10.0, TRUE),
+      ('CRT-PM-05', 'PM_EVALUATION', 'PM_V1_7CRITERIA', 'collaboration', 'Collaboration', NULL, 1.0/7.0, 5, 1.0, 10.0, TRUE),
+      ('CRT-PM-06', 'PM_EVALUATION', 'PM_V1_7CRITERIA', 'initiative', 'Initiative', NULL, 1.0/7.0, 6, 1.0, 10.0, TRUE),
+      ('CRT-PM-07', 'PM_EVALUATION', 'PM_V1_7CRITERIA', 'research_contribution', 'Research Contribution', NULL, 1.0/7.0, 7, 1.0, 10.0, TRUE),
 
-      ('CRT-PR-01', 'MONTHLY_PRESENTATION', 'progress_achievement', 'Progress Achievement', 1, 1.0, 10.0, TRUE),
-      ('CRT-PR-02', 'MONTHLY_PRESENTATION', 'quality_of_result', 'Quality of Result', 2, 1.0, 10.0, TRUE),
-      ('CRT-PR-03', 'MONTHLY_PRESENTATION', 'technical_understanding', 'Technical Understanding', 3, 1.0, 10.0, TRUE),
-      ('CRT-PR-04', 'MONTHLY_PRESENTATION', 'problem_solving', 'Problem Solving', 4, 1.0, 10.0, TRUE),
-      ('CRT-PR-05', 'MONTHLY_PRESENTATION', 'presentation_delivery', 'Presentation Delivery', 5, 1.0, 10.0, TRUE),
-      ('CRT-PR-06', 'MONTHLY_PRESENTATION', 'response_to_questions', 'Response to Questions', 6, 1.0, 10.0, TRUE),
-      ('CRT-PR-07', 'MONTHLY_PRESENTATION', 'next_plan', 'Next Plan', 7, 1.0, 10.0, TRUE)
-    ON CONFLICT (period_type, key) DO UPDATE SET
+      ('CRT-PR-01', 'MONTHLY_PRESENTATION', 'PRESENTATION_V1_7CRITERIA', 'progress_achievement', 'Progress Achievement', NULL, 1.0/7.0, 1, 1.0, 10.0, TRUE),
+      ('CRT-PR-02', 'MONTHLY_PRESENTATION', 'PRESENTATION_V1_7CRITERIA', 'quality_of_result', 'Quality of Result', NULL, 1.0/7.0, 2, 1.0, 10.0, TRUE),
+      ('CRT-PR-03', 'MONTHLY_PRESENTATION', 'PRESENTATION_V1_7CRITERIA', 'technical_understanding', 'Technical Understanding', NULL, 1.0/7.0, 3, 1.0, 10.0, TRUE),
+      ('CRT-PR-04', 'MONTHLY_PRESENTATION', 'PRESENTATION_V1_7CRITERIA', 'problem_solving', 'Problem Solving', NULL, 1.0/7.0, 4, 1.0, 10.0, TRUE),
+      ('CRT-PR-05', 'MONTHLY_PRESENTATION', 'PRESENTATION_V1_7CRITERIA', 'presentation_delivery', 'Presentation Delivery', NULL, 1.0/7.0, 5, 1.0, 10.0, TRUE),
+      ('CRT-PR-06', 'MONTHLY_PRESENTATION', 'PRESENTATION_V1_7CRITERIA', 'response_to_questions', 'Response to Questions', NULL, 1.0/7.0, 6, 1.0, 10.0, TRUE),
+      ('CRT-PR-07', 'MONTHLY_PRESENTATION', 'PRESENTATION_V1_7CRITERIA', 'next_plan', 'Next Plan', NULL, 1.0/7.0, 7, 1.0, 10.0, TRUE),
+
+      ('CRT-PM-V2-01', 'PM_EVALUATION', 'PM_V2_KSA', 'knowledge', 'Knowledge', 'Pemahaman konsep, teknologi, sistem, dan metodologi pekerjaan.', 1.0/3.0, 1, 1.0, 10.0, TRUE),
+      ('CRT-PM-V2-02', 'PM_EVALUATION', 'PM_V2_KSA', 'skill', 'Skill', 'Kemampuan teknis, problem solving, penggunaan tools, serta kualitas pengerjaan.', 1.0/3.0, 2, 1.0, 10.0, TRUE),
+      ('CRT-PM-V2-03', 'PM_EVALUATION', 'PM_V2_KSA', 'application', 'Application', 'Penerapan kemampuan dalam tugas, kualitas deliverable, dan kontribusi nyata terhadap proyek/riset.', 1.0/3.0, 3, 1.0, 10.0, TRUE),
+
+      ('CRT-PR-V2-01', 'MONTHLY_PRESENTATION', 'PRESENTATION_V2_KSA', 'knowledge', 'Knowledge', 'Penguasaan materi, pemahaman teknis, dan alasan keputusan yang dipresentasikan.', 1.0/3.0, 1, 1.0, 10.0, TRUE),
+      ('CRT-PR-V2-02', 'MONTHLY_PRESENTATION', 'PRESENTATION_V2_KSA', 'skill', 'Skill', 'Kemampuan demonstrasi, komunikasi teknis, analisis, dan menjawab pertanyaan.', 1.0/3.0, 2, 1.0, 10.0, TRUE),
+      ('CRT-PR-V2-03', 'MONTHLY_PRESENTATION', 'PRESENTATION_V2_KSA', 'application', 'Application', 'Bukti implementasi, hasil pekerjaan/riset, serta relevansi solusi yang dipresentasikan.', 1.0/3.0, 3, 1.0, 10.0, TRUE)
+    ON CONFLICT (id) DO UPDATE SET
+      period_type = EXCLUDED.period_type,
+      scoring_version = EXCLUDED.scoring_version,
+      key = EXCLUDED.key,
       name = EXCLUDED.name,
-      sort_order = EXCLUDED.sort_order;
+      description = EXCLUDED.description,
+      weight = EXCLUDED.weight,
+      sort_order = EXCLUDED.sort_order,
+      min_score = EXCLUDED.min_score,
+      max_score = EXCLUDED.max_score,
+      is_active = EXCLUDED.is_active;
 
     CREATE TABLE IF NOT EXISTS evaluation_groups (
       id TEXT PRIMARY KEY,
@@ -499,7 +596,89 @@ async function ensureEvaluationTables(executor = query) {
       ADD COLUMN IF NOT EXISTS division_id TEXT REFERENCES research_divisions(id) ON DELETE SET NULL;
 
     ALTER TABLE evaluation_periods
-      ADD COLUMN IF NOT EXISTS group_id TEXT REFERENCES evaluation_groups(id) ON DELETE SET NULL;
+      ADD COLUMN IF NOT EXISTS group_id TEXT REFERENCES evaluation_groups(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS scoring_version TEXT;
+
+    UPDATE evaluation_periods
+    SET scoring_version = 'PM_V1_7CRITERIA'
+    WHERE (type = 'PM_EVALUATION' OR type = 'PM_BIWEEKLY') AND scoring_version IS NULL;
+
+    UPDATE evaluation_periods
+    SET scoring_version = 'PRESENTATION_V1_7CRITERIA'
+    WHERE type = 'MONTHLY_PRESENTATION' AND scoring_version IS NULL;
+
+    ALTER TABLE evaluation_criteria
+      ADD COLUMN IF NOT EXISTS scoring_version TEXT,
+      ADD COLUMN IF NOT EXISTS weight DOUBLE PRECISION NOT NULL DEFAULT 1.0;
+
+    UPDATE evaluation_criteria
+    SET scoring_version = 'PM_V1_7CRITERIA', weight = 1.0 / 7.0
+    WHERE (period_type = 'PM_EVALUATION' OR period_type = 'PM_BIWEEKLY') AND (scoring_version IS NULL OR scoring_version = 'PM_V1_7CRITERIA');
+
+    UPDATE evaluation_criteria
+    SET scoring_version = 'PRESENTATION_V1_7CRITERIA', weight = 1.0 / 7.0
+    WHERE period_type = 'MONTHLY_PRESENTATION' AND (scoring_version IS NULL OR scoring_version = 'PRESENTATION_V1_7CRITERIA');
+
+    ALTER TABLE evaluation_criteria DROP CONSTRAINT IF EXISTS evaluation_criteria_period_type_key_key;
+
+    DO $safe_constraints$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'evaluation_periods'::regclass AND conname = 'chk_evaluation_periods_scoring_version'
+      ) THEN
+        ALTER TABLE evaluation_periods ADD CONSTRAINT chk_evaluation_periods_scoring_version
+          CHECK (scoring_version IN ('PM_V1_7CRITERIA', 'PM_V2_KSA', 'PRESENTATION_V1_7CRITERIA', 'PRESENTATION_V2_KSA'));
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'evaluation_criteria'::regclass AND conname = 'chk_evaluation_criteria_scoring_version'
+      ) THEN
+        ALTER TABLE evaluation_criteria ADD CONSTRAINT chk_evaluation_criteria_scoring_version
+          CHECK (scoring_version IN ('PM_V1_7CRITERIA', 'PM_V2_KSA', 'PRESENTATION_V1_7CRITERIA', 'PRESENTATION_V2_KSA'));
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'evaluation_criteria'::regclass AND conname = 'uq_evaluation_criteria_version_key'
+      ) THEN
+        ALTER TABLE evaluation_criteria ADD CONSTRAINT uq_evaluation_criteria_version_key
+          UNIQUE (scoring_version, key);
+      END IF;
+    EXCEPTION WHEN OTHERS THEN
+      NULL;
+    END $safe_constraints$;
+
+    CREATE TABLE IF NOT EXISTS evaluation_emergency_audits (
+      id TEXT PRIMARY KEY,
+      period_id TEXT NOT NULL,
+      period_title TEXT NOT NULL,
+      period_type TEXT NOT NULL,
+      period_status_before TEXT NOT NULL,
+      actor_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+      actor_name TEXT,
+      actor_role TEXT,
+      action_type TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      affected_records_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+      execution_status TEXT NOT NULL CHECK (execution_status IN ('SUCCESS', 'FAILURE')),
+      error_message TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS evaluation_monitoring_grants (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      period_id TEXT REFERENCES evaluation_periods(id) ON DELETE CASCADE,
+      group_id TEXT REFERENCES evaluation_groups(id) ON DELETE CASCADE,
+      granted_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      reason TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      revoked_at TIMESTAMPTZ,
+      revoked_by TEXT REFERENCES users(id) ON DELETE SET NULL
+    );
     `
   );
 }
@@ -1547,15 +1726,24 @@ async function createEvaluationPeriod(payload = {}, createdBy = null, executor =
     );
   }
 
+  let scoringVersion = payload.scoringVersion || payload.scoring_version || null;
+  if (scoringVersion) {
+    if (!VALID_PERIOD_VERSIONS[type] || !VALID_PERIOD_VERSIONS[type].includes(scoringVersion)) {
+      throw createHttpError(`Versi penilaian '${scoringVersion}' tidak valid untuk tipe periode ${type}.`, 400);
+    }
+  } else {
+    scoringVersion = DEFAULT_SCORING_VERSION[type];
+  }
+
   const id = buildId("EVP");
   const result = await runQuery(
     executor,
     `
-    INSERT INTO evaluation_periods (id, title, type, status, start_date, end_date, description, created_by, group_id)
-    VALUES ($1, $2, $3, 'DRAFT', $4::date, $5::date, $6, $7, $8)
+    INSERT INTO evaluation_periods (id, title, type, scoring_version, status, start_date, end_date, description, created_by, group_id)
+    VALUES ($1, $2, $3, $4, 'DRAFT', $5::date, $6::date, $7, $8, $9)
     RETURNING *
     `,
-    [id, title, type, startDate, endDate, description, createdBy, groupId]
+    [id, title, type, scoringVersion, startDate, endDate, description, createdBy, groupId]
   );
 
   return mapPeriodRow(result.rows[0]);
@@ -1580,6 +1768,22 @@ async function updateEvaluationPeriod(id, payload = {}, executor = query) {
 
   if (startDate > endDate) {
     throw createHttpError("start_date tidak boleh lebih besar dari end_date.", 400);
+  }
+
+  let scoringVersion = period.scoring_version;
+  const requestedVersion = payload.scoringVersion !== undefined ? payload.scoringVersion : payload.scoring_version;
+  if (requestedVersion !== undefined && requestedVersion !== null && requestedVersion !== period.scoring_version) {
+    if (period.status === "CLOSED") {
+      throw createHttpError("Periode evaluasi sudah ditutup dan tidak dapat diubah.", 409);
+    }
+    if (!VALID_PERIOD_VERSIONS[period.type] || !VALID_PERIOD_VERSIONS[period.type].includes(requestedVersion)) {
+      throw createHttpError(`Versi penilaian '${requestedVersion}' tidak valid untuk tipe periode ${period.type}.`, 400);
+    }
+    const subCountRes = await runQuery(executor, "SELECT COUNT(*)::int AS count FROM evaluation_submissions WHERE period_id = $1", [id]);
+    if (subCountRes.rows[0].count > 0) {
+      throw createHttpError("Versi penilaian tidak dapat diubah karena periode sudah memiliki data penilaian.", 409);
+    }
+    scoringVersion = requestedVersion;
   }
 
   const groupId = payload.groupId !== undefined ? (payload.groupId || null) : (payload.group_id !== undefined ? (payload.group_id || null) : period.group_id);
@@ -1643,14 +1847,74 @@ async function updateEvaluationPeriod(id, payload = {}, executor = query) {
     executor,
     `
     UPDATE evaluation_periods
-    SET title = $2, description = $3, start_date = $4::date, end_date = $5::date, group_id = $6, updated_at = NOW()
+    SET title = $2, description = $3, start_date = $4::date, end_date = $5::date, group_id = $6, scoring_version = $7, updated_at = NOW()
     WHERE id = $1
     RETURNING *
     `,
-    [id, title, description, startDate, endDate, groupId]
+    [id, title, description, startDate, endDate, groupId, scoringVersion]
   );
 
   return mapPeriodRow(result.rows[0]);
+}
+
+async function migratePeriodScoringVersion(periodId, targetVersion, { reason = null } = {}, actor = null, executor = pool) {
+  await ensureEvaluationTables(executor);
+  const client = typeof executor.connect === "function" ? await executor.connect() : executor;
+  const ownsTransaction = typeof executor.connect === "function";
+
+  try {
+    if (ownsTransaction) await client.query("BEGIN");
+
+    const periodRes = await client.query("SELECT * FROM evaluation_periods WHERE id = $1 FOR UPDATE", [periodId]);
+    if (periodRes.rowCount === 0) throw createHttpError("Periode evaluasi tidak ditemukan.", 404);
+    const period = periodRes.rows[0];
+
+    if (period.status === "CLOSED") {
+      throw createHttpError("Periode evaluasi sudah ditutup dan tidak dapat diubah.", 409);
+    }
+
+    if (!targetVersion) {
+      throw createHttpError("targetVersion wajib diisi.", 400);
+    }
+
+    const validVersions = VALID_PERIOD_VERSIONS[period.type] || [];
+    if (!validVersions.includes(targetVersion)) {
+      throw createHttpError(`Versi penilaian '${targetVersion}' tidak valid untuk tipe periode ${period.type}.`, 400);
+    }
+
+    // Idempotent: if already targetVersion, return current period
+    if (period.scoring_version === targetVersion) {
+      if (ownsTransaction) await client.query("COMMIT");
+      return mapPeriodRow(period);
+    }
+
+    // Check if evaluation data already exists
+    const subCountRes = await client.query(
+      "SELECT COUNT(*)::int AS count FROM evaluation_submissions WHERE period_id = $1",
+      [periodId]
+    );
+    if (subCountRes.rows[0].count > 0) {
+      throw createHttpError("Versi penilaian tidak dapat diubah karena periode sudah memiliki data penilaian.", 409);
+    }
+
+    const updatedRes = await client.query(
+      `
+      UPDATE evaluation_periods
+      SET scoring_version = $2, updated_at = NOW()
+      WHERE id = $1
+      RETURNING *
+      `,
+      [periodId, targetVersion]
+    );
+
+    if (ownsTransaction) await client.query("COMMIT");
+    return mapPeriodRow(updatedRes.rows[0]);
+  } catch (err) {
+    if (ownsTransaction) await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    if (ownsTransaction) client.release();
+  }
 }
 
 async function openEvaluationPeriod(id, openedBy = null, executor = pool) {
@@ -1796,14 +2060,23 @@ async function closeEvaluationPeriod(id, closedBy = null, optionsOrExecutor = {}
 
 async function deleteEvaluationPeriod(id, options = {}, executor = pool) {
   await ensureEvaluationTables(executor);
-  const client = typeof executor?.connect === "function" ? await executor.connect() : executor;
-  const ownsTransaction = typeof executor?.connect === "function";
+  const isPool = typeof executor?.connect === "function" && typeof executor?.release !== "function";
+  const client = isPool ? await executor.connect() : executor;
+  const ownsTransaction = isPool;
 
   try {
     if (ownsTransaction) await client.query("BEGIN");
 
     const period = await getEvaluationPeriodById(id, client);
     if (!period) throw createHttpError("Periode evaluasi tidak ditemukan.", 404);
+
+    // Protection: CLOSED periods cannot be deleted through regular deletion
+    if (period.status === "CLOSED" && !options.isEmergency) {
+      throw createHttpError(
+        "Periode evaluasi sudah ditutup dan tidak dapat dihapus melalui operasi reguler. Gunakan prosedur darurat khusus.",
+        409
+      );
+    }
 
     // Check if there are submitted evaluations
     const subRes = await runQuery(
@@ -1813,7 +2086,7 @@ async function deleteEvaluationPeriod(id, options = {}, executor = pool) {
     );
     const submittedCount = subRes.rows[0]?.count || 0;
 
-    if (submittedCount > 0 && !options.force) {
+    if (submittedCount > 0 && !options.force && !options.isEmergency) {
       throw createHttpError(
         `Periode evaluasi memiliki ${submittedCount} nilai yang sudah disubmit. Gunakan konfirmasi force untuk menghapus secara permanen.`,
         409
@@ -1845,31 +2118,379 @@ async function deleteEvaluationPeriod(id, options = {}, executor = pool) {
   }
 }
 
+// =============================================================================
+// EMERGENCY HANDLING FOR CLOSED PERIODS
+// =============================================================================
+
+async function executeEmergencyActionOnPeriod(periodId, payload = {}, actor = null, executor = pool) {
+  await ensureEvaluationTables(executor);
+
+  // 1. Validate actor permission
+  if (!actor || !actor.id) {
+    throw createHttpError("Autentikasi diperlukan.", 401);
+  }
+  const actorRole = actor.role;
+  if (actorRole !== "operator") {
+    throw createHttpError("Akses ditolak. Prosedur darurat hanya dapat dilakukan oleh Admin/Operator.", 403);
+  }
+
+  // 2. Validate reason: non-empty, meaningful (minimum 10 characters)
+  const reason = String(payload.reason || "").trim();
+  if (reason.length < 10) {
+    throw createHttpError("Alasan tindakan darurat wajib diisi minimal 10 karakter.", 422);
+  }
+
+  // 3. Validate action type
+  const actionType = String(payload.action || "").trim().toUpperCase();
+  const VALID_ACTIONS = ["EMERGENCY_DELETE", "EMERGENCY_ARCHIVE"];
+  if (!VALID_ACTIONS.includes(actionType)) {
+    throw createHttpError("Jenis tindakan darurat tidak valid (pilihan: EMERGENCY_DELETE, EMERGENCY_ARCHIVE).", 422);
+  }
+
+  const isPool = typeof executor?.connect === "function" && typeof executor?.release !== "function";
+  const client = isPool ? await executor.connect() : executor;
+  const ownsTransaction = isPool;
+
+  try {
+    if (ownsTransaction) await client.query("BEGIN");
+
+    // Lock period row
+    const periodRes = await runQuery(client, "SELECT * FROM evaluation_periods WHERE id = $1 FOR UPDATE", [periodId]);
+    if (periodRes.rowCount === 0) {
+      throw createHttpError("Periode evaluasi tidak ditemukan.", 404);
+    }
+    const period = periodRes.rows[0];
+
+    // Must be CLOSED
+    if (period.status !== "CLOSED") {
+      throw createHttpError("Tindakan darurat hanya berlaku untuk periode yang sudah berstatus CLOSED.", 409);
+    }
+
+    // 4. Validate explicit confirmation
+    const confirmTitle = String(payload.confirmPeriodTitle || "").trim();
+    if (confirmTitle !== period.title && payload.confirm !== true) {
+      throw createHttpError(`Konfirmasi judul periode darurat tidak sesuai. Harap konfirmasi dengan judul "${period.title}".`, 422);
+    }
+
+    // 5. Gather summary of affected records
+    const subCountRes = await runQuery(client, "SELECT COUNT(*)::int AS count FROM evaluation_submissions WHERE period_id = $1", [periodId]);
+    const asnCountRes = await runQuery(client, "SELECT COUNT(*)::int AS count FROM evaluation_assignments WHERE period_id = $1", [periodId]);
+    const sessCountRes = await runQuery(client, "SELECT COUNT(*)::int AS count FROM presentation_sessions WHERE period_id = $1", [periodId]);
+    const evalCountRes = await runQuery(client, "SELECT COUNT(*)::int AS count FROM evaluation_period_evaluators WHERE period_id = $1", [periodId]);
+    const scoreItemsCountRes = await runQuery(
+      client,
+      "SELECT COUNT(*)::int AS count FROM evaluation_score_items WHERE submission_id IN (SELECT id FROM evaluation_submissions WHERE period_id = $1)",
+      [periodId]
+    );
+
+    const affectedSummary = {
+      submissions_count: subCountRes.rows[0]?.count || 0,
+      assignments_count: asnCountRes.rows[0]?.count || 0,
+      sessions_count: sessCountRes.rows[0]?.count || 0,
+      period_evaluators_count: evalCountRes.rows[0]?.count || 0,
+      score_items_count: scoreItemsCountRes.rows[0]?.count || 0
+    };
+
+    const auditId = buildId("EVA-EMG");
+
+    // 6. Record audit trail INSIDE the transaction with SUCCESS
+    // NOTE: period_id has NO foreign key to evaluation_periods so that audit persists even after deletion
+    await runQuery(
+      client,
+      `
+      INSERT INTO evaluation_emergency_audits (
+        id, period_id, period_title, period_type, period_status_before,
+        actor_id, actor_name, actor_role, action_type, reason,
+        affected_records_summary, execution_status, created_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'SUCCESS', NOW())
+      `,
+      [
+        auditId,
+        period.id,
+        period.title,
+        period.type,
+        period.status,
+        actor.id,
+        actor.name || "Admin",
+        actorRole,
+        actionType,
+        reason,
+        JSON.stringify(affectedSummary)
+      ]
+    );
+
+    // 7. Perform the specific emergency action
+    if (actionType === "EMERGENCY_DELETE") {
+      await deleteEvaluationPeriod(periodId, { force: true, isEmergency: true }, client);
+    } else if (actionType === "EMERGENCY_ARCHIVE") {
+      await runQuery(
+        client,
+        `
+        UPDATE evaluation_periods
+        SET title = CASE WHEN title LIKE '[ARCHIVED]%' THEN title ELSE '[ARCHIVED] ' || title END,
+            description = COALESCE(description, '') || E'\n[Emergency Archive by ' || $2 || E' on ' || NOW()::text || E']: ' || $3,
+            updated_at = NOW()
+        WHERE id = $1
+        `,
+        [periodId, actor.name || "Admin", reason]
+      );
+    }
+
+    if (ownsTransaction) await client.query("COMMIT");
+
+    return {
+      success: true,
+      action: actionType,
+      periodId,
+      periodTitle: period.title,
+      auditId,
+      affectedRecordsSummary: affectedSummary,
+      message: `Tindakan darurat "${actionType}" pada periode "${period.title}" berhasil dilaksanakan dan dicatat.`
+    };
+  } catch (error) {
+    if (ownsTransaction) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (_) {}
+    }
+    throw error;
+  } finally {
+    if (ownsTransaction) client.release();
+  }
+}
+
+async function listEmergencyAudits({ periodId = null } = {}, executor = query) {
+  await ensureEvaluationTables(executor);
+  const params = [];
+  let where = "";
+  if (periodId) {
+    params.push(periodId);
+    where = "WHERE period_id = $1";
+  }
+  const res = await runQuery(
+    executor,
+    `SELECT * FROM evaluation_emergency_audits ${where} ORDER BY created_at DESC`,
+    params
+  );
+  return res.rows;
+}
+
+// =============================================================================
+// DOSEN MONITORING GRANTS (Scope-Aware Cross-PM Visibility)
+// =============================================================================
+
+async function createMonitoringGrant(
+  { userId, periodId = null, groupId = null, reason = null, grantedBy = null } = {},
+  executor = pool
+) {
+  await ensureEvaluationTables(executor);
+  if (!userId) throw createHttpError("userId wajib diisi.", 400);
+
+  const userCheck = await runQuery(executor, "SELECT id, role, name FROM users WHERE id = $1", [userId]);
+  if (userCheck.rowCount === 0) throw createHttpError("User penerima izin tidak ditemukan.", 404);
+
+  if (periodId) {
+    const periodCheck = await runQuery(executor, "SELECT id FROM evaluation_periods WHERE id = $1", [periodId]);
+    if (periodCheck.rowCount === 0) throw createHttpError("Periode tidak ditemukan.", 404);
+  }
+
+  if (groupId) {
+    const groupCheck = await runQuery(executor, "SELECT id FROM evaluation_groups WHERE id = $1", [groupId]);
+    if (groupCheck.rowCount === 0) throw createHttpError("Kelompok evaluasi tidak ditemukan.", 404);
+  }
+
+  const id = buildId("EVA-MNT");
+  const res = await runQuery(
+    executor,
+    `
+    INSERT INTO evaluation_monitoring_grants (
+      id, user_id, period_id, group_id, granted_by, is_active, reason, created_at
+    )
+    VALUES ($1, $2, $3, $4, $5, TRUE, $6, NOW())
+    RETURNING *
+    `,
+    [id, userId, periodId || null, groupId || null, grantedBy || null, reason ? String(reason).trim() : null]
+  );
+
+  return res.rows[0];
+}
+
+async function revokeMonitoringGrant(grantId, revokedBy = null, executor = pool) {
+  await ensureEvaluationTables(executor);
+  const res = await runQuery(
+    executor,
+    `
+    UPDATE evaluation_monitoring_grants
+    SET is_active = FALSE, revoked_at = NOW(), revoked_by = $2
+    WHERE id = $1
+    RETURNING *
+    `,
+    [grantId, revokedBy || null]
+  );
+  if (res.rowCount === 0) throw createHttpError("Izin monitoring tidak ditemukan.", 404);
+  return res.rows[0];
+}
+
+async function listMonitoringGrants(
+  { userId = null, periodId = null, groupId = null, isActive = null } = {},
+  executor = query
+) {
+  await ensureEvaluationTables(executor);
+  const conditions = [];
+  const params = [];
+
+  if (userId) {
+    params.push(userId);
+    conditions.push(`emg.user_id = $${params.length}`);
+  }
+  if (periodId) {
+    params.push(periodId);
+    conditions.push(`emg.period_id = $${params.length}`);
+  }
+  if (groupId) {
+    params.push(groupId);
+    conditions.push(`emg.group_id = $${params.length}`);
+  }
+  if (isActive !== null && isActive !== undefined) {
+    params.push(Boolean(isActive));
+    conditions.push(`emg.is_active = $${params.length}`);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  const res = await runQuery(
+    executor,
+    `
+    SELECT emg.*,
+           u.name AS user_name, u.email AS user_email, u.role AS user_role,
+           ep.title AS period_title,
+           eg.name AS group_name,
+           u_by.name AS granted_by_name
+    FROM evaluation_monitoring_grants emg
+    JOIN users u ON u.id = emg.user_id
+    LEFT JOIN evaluation_periods ep ON ep.id = emg.period_id
+    LEFT JOIN evaluation_groups eg ON eg.id = emg.group_id
+    LEFT JOIN users u_by ON u_by.id = emg.granted_by
+    ${where}
+    ORDER BY emg.created_at DESC
+    `,
+    params
+  );
+  return res.rows;
+}
+
+async function hasActiveMonitoringGrant(userId, { periodId = null, groupId = null } = {}, executor = query) {
+  if (!userId) return false;
+  await ensureEvaluationTables(executor);
+
+  const res = await runQuery(
+    executor,
+    `
+    SELECT id, period_id, group_id
+    FROM evaluation_monitoring_grants
+    WHERE user_id = $1
+      AND is_active = TRUE
+      AND (period_id IS NULL OR period_id = $2)
+      AND (group_id IS NULL OR group_id = $3)
+    LIMIT 1
+    `,
+    [userId, periodId, groupId]
+  );
+  return res.rowCount > 0;
+}
+
+
 
 // =============================================================================
 // EVALUATION CRITERIA
 // =============================================================================
 
-async function listEvaluationCriteria(periodType = null, executor = query) {
+async function listEvaluationCriteria(filterOrType = null, executor = query) {
   await ensureEvaluationTables(executor);
+  let periodType = null;
+  let scoringVersion = null;
+  let isActive = true;
+
+  if (typeof filterOrType === "string") {
+    periodType = filterOrType;
+  } else if (typeof filterOrType === "object" && filterOrType !== null) {
+    periodType = filterOrType.periodType || filterOrType.type || null;
+    scoringVersion = filterOrType.scoringVersion || filterOrType.scoring_version || null;
+    if (filterOrType.isActive !== undefined) {
+      isActive = filterOrType.isActive;
+    }
+  }
+
+  const conditions = [];
   const params = [];
-  let where = "WHERE is_active = TRUE";
+
+  if (isActive !== null && isActive !== undefined) {
+    params.push(Boolean(isActive));
+    conditions.push(`is_active = $${params.length}`);
+  }
+
   if (periodType) {
     const normalizedType = periodType === "PM_BIWEEKLY" ? "PM_EVALUATION" : periodType;
     params.push(normalizedType);
-    where += ` AND (period_type = $1 OR ($1 = 'PM_EVALUATION' AND period_type = 'PM_BIWEEKLY'))`;
+    conditions.push(`(period_type = $${params.length} OR ($${params.length} = 'PM_EVALUATION' AND period_type = 'PM_BIWEEKLY'))`);
   }
+
+  if (scoringVersion) {
+    params.push(scoringVersion);
+    conditions.push(`scoring_version = $${params.length}`);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
   const result = await runQuery(
     executor,
     `
     SELECT *
     FROM evaluation_criteria
     ${where}
-    ORDER BY period_type ASC, sort_order ASC
+    ORDER BY period_type ASC, scoring_version ASC, sort_order ASC
     `,
     params
   );
-  return result.rows;
+
+  return result.rows.map((r) => ({
+    ...r,
+    weight: r.weight != null ? Number(r.weight) : (r.scoring_version?.includes("KSA") ? 1.0 / 3.0 : 1.0 / 7.0),
+    sort_order: Number(r.sort_order),
+    min_score: Number(r.min_score),
+    max_score: Number(r.max_score)
+  }));
+}
+
+async function getPeriodCriteria(periodId, executor = query) {
+  await ensureEvaluationTables(executor);
+  if (!periodId) throw createHttpError("periodId wajib diisi.", 400);
+
+  const period = await getEvaluationPeriodById(periodId, executor);
+  if (!period) throw createHttpError("Periode evaluasi tidak ditemukan.", 404);
+
+  const scoringVersion = period.scoring_version || (
+    period.type === "PM_EVALUATION" ? SCORING_VERSIONS.PM_V1_7CRITERIA : SCORING_VERSIONS.PRESENTATION_V1_7CRITERIA
+  );
+
+  const criteriaRows = await listEvaluationCriteria({ scoringVersion, isActive: true }, executor);
+
+  return {
+    periodId: period.id,
+    periodType: period.type,
+    scoringVersion,
+    scale: {
+      min: 1,
+      max: 10
+    },
+    criteria: criteriaRows.map((c) => ({
+      key: c.key,
+      name: c.name,
+      weight: c.weight,
+      sort_order: c.sort_order,
+      description: c.description || null
+    }))
+  };
 }
 
 // =============================================================================
@@ -1935,6 +2556,7 @@ async function getPmAssignmentById(id, executor = query) {
     `
     SELECT ea.*,
            ep.title AS period_title, ep.status AS period_status, ep.type AS period_type,
+           COALESCE(ea.group_id, ep.group_id) AS group_id,
            s.nim, u_student.name AS student_name,
            u_evaluator.name AS evaluator_name,
            COALESCE(epe.attendance_status, 'PENDING') AS attendance_status,
@@ -2038,7 +2660,7 @@ async function savePmEvaluationSubmission(assignmentId, evaluatorId, payload = {
 
     const asnRes = await client.query(
       `
-      SELECT ea.*, ep.status AS period_status, ep.type AS period_type
+      SELECT ea.*, ep.status AS period_status, ep.type AS period_type, ep.scoring_version AS period_scoring_version
       FROM evaluation_assignments ea
       JOIN evaluation_periods ep ON ep.id = ea.period_id
       WHERE ea.id = $1
@@ -2108,39 +2730,82 @@ async function savePmEvaluationSubmission(assignmentId, evaluatorId, payload = {
       throw createHttpError("Status evaluasi harus DRAFT atau SUBMITTED.", 400);
     }
 
-    const rawScores = Array.isArray(payload.scores) ? payload.scores : [];
+    let rawScores = [];
+    if (Array.isArray(payload.scores)) {
+      rawScores = payload.scores;
+    } else if (payload.scores && typeof payload.scores === "object") {
+      rawScores = Object.entries(payload.scores).map(([k, val]) => {
+        if (val && typeof val === "object" && !Array.isArray(val)) {
+          return {
+            criteriaKey: k,
+            score: val.score,
+            notes: val.notes
+          };
+        }
+        return {
+          criteriaKey: k,
+          score: val
+        };
+      });
+    }
+
     const strength = payload.strength != null ? String(payload.strength).trim() : null;
     const improvement = payload.improvement != null ? String(payload.improvement).trim() : null;
     const notes = payload.notes != null ? String(payload.notes).trim() : null;
 
-    // Fetch active criteria for PM_EVALUATION
-    const criteriaList = (await client.query(
-      "SELECT * FROM evaluation_criteria WHERE (period_type = 'PM_EVALUATION' OR period_type = 'PM_BIWEEKLY') AND is_active = TRUE ORDER BY sort_order ASC"
+    const scoringVersion = assignment.period_scoring_version || (
+      assignment.period_type === "PM_BIWEEKLY" || assignment.period_type === "PM_EVALUATION"
+        ? SCORING_VERSIONS.PM_V1_7CRITERIA
+        : SCORING_VERSIONS.PRESENTATION_V1_7CRITERIA
+    );
+
+    // Fetch active criteria for this scoring version
+    let criteriaList = (await client.query(
+      "SELECT * FROM evaluation_criteria WHERE scoring_version = $1 AND is_active = TRUE ORDER BY sort_order ASC",
+      [scoringVersion]
     )).rows;
+
+    if (criteriaList.length === 0) {
+      criteriaList = (await client.query(
+        "SELECT * FROM evaluation_criteria WHERE (period_type = 'PM_EVALUATION' OR period_type = 'PM_BIWEEKLY') AND is_active = TRUE ORDER BY sort_order ASC"
+      )).rows;
+    }
     const criteriaByKey = new Map(criteriaList.map((c) => [c.key, c]));
 
-    // Validate score values (must be between 1.0 and 10.0)
+    // Validate score items
     const scoreMap = new Map();
+    const seenKeys = new Set();
     for (const item of rawScores) {
-      const key = String(item.criteriaKey || item.criteria_key || "").trim();
+      const key = String(item.criteriaKey || item.criteria_key || item.key || "").trim();
+      if (!key) {
+        throw createHttpError("Kriteria penilaian tidak boleh kosong.", 400);
+      }
+      if (seenKeys.has(key)) {
+        throw createHttpError(`Duplikat kriteria '${key}' pada penilaian.`, 400);
+      }
+      seenKeys.add(key);
+
+      if (!criteriaByKey.has(key)) {
+        throw createHttpError(`Kriteria '${key}' tidak dikenali untuk versi penilaian ${scoringVersion}.`, 400);
+      }
+
       const numScore = Number(item.score);
-      if (item.score != null && (isNaN(numScore) || numScore < 1.0 || numScore > 10.0)) {
+      if (item.score == null || item.score === "" || isNaN(numScore) || numScore < 1.0 || numScore > 10.0) {
         throw createHttpError(`Nilai untuk kriteria '${key}' harus berupa angka antara 1.0 dan 10.0.`, 400);
       }
-      if (key && criteriaByKey.has(key)) {
-        scoreMap.set(key, {
-          criteria: criteriaByKey.get(key),
-          score: Math.round(numScore * 100) / 100,
-          notes: item.notes ? String(item.notes).trim() : null
-        });
-      }
+
+      scoreMap.set(key, {
+        criteria: criteriaByKey.get(key),
+        score: Math.round(numScore * 100) / 100,
+        notes: item.notes ? String(item.notes).trim() : null
+      });
     }
 
-    // If SUBMITTED: all 7 criteria are mandatory
+    // If SUBMITTED: all criteria for this version are mandatory
     if (targetStatus === "SUBMITTED") {
       for (const criteria of criteriaList) {
         if (!scoreMap.has(criteria.key)) {
-          throw createHttpError(`Seluruh 7 kriteria wajib diisi sebelum submit (kurang: ${criteria.name}).`, 422);
+          throw createHttpError(`Seluruh kriteria (${criteriaList.length}) wajib diisi sebelum submit (kurang: ${criteria.name}).`, 422);
         }
       }
     }
@@ -2755,7 +3420,7 @@ async function savePresentationEvaluationSubmission(slotId, evaluatorId, payload
 
     const slotRes = await client.query(
       `
-      SELECT slot.*, ps.id AS session_id, ep.id AS period_id, ep.status AS period_status
+      SELECT slot.*, ps.id AS session_id, ep.id AS period_id, ep.status AS period_status, ep.type AS period_type, ep.scoring_version AS period_scoring_version
       FROM presentation_slots slot
       JOIN presentation_sessions ps ON ps.id = slot.session_id
       JOIN evaluation_periods ep ON ep.id = ps.period_id
@@ -2781,38 +3446,77 @@ async function savePresentationEvaluationSubmission(slotId, evaluatorId, payload
       throw createHttpError("Status evaluasi harus DRAFT atau SUBMITTED.", 400);
     }
 
-    const rawScores = Array.isArray(payload.scores) ? payload.scores : [];
+    let rawScores = [];
+    if (Array.isArray(payload.scores)) {
+      rawScores = payload.scores;
+    } else if (payload.scores && typeof payload.scores === "object") {
+      rawScores = Object.entries(payload.scores).map(([k, val]) => {
+        if (val && typeof val === "object" && !Array.isArray(val)) {
+          return {
+            criteriaKey: k,
+            score: val.score,
+            notes: val.notes
+          };
+        }
+        return {
+          criteriaKey: k,
+          score: val
+        };
+      });
+    }
+
     const strength = payload.strength != null ? String(payload.strength).trim() : null;
     const improvement = payload.improvement != null ? String(payload.improvement).trim() : null;
     const notes = payload.notes != null ? String(payload.notes).trim() : null;
 
-    // Fetch active criteria for MONTHLY_PRESENTATION
-    const criteriaList = (await client.query(
-      "SELECT * FROM evaluation_criteria WHERE period_type = 'MONTHLY_PRESENTATION' AND is_active = TRUE ORDER BY sort_order ASC"
+    const scoringVersion = slot.period_scoring_version || SCORING_VERSIONS.PRESENTATION_V1_7CRITERIA;
+
+    // Fetch active criteria for this scoring version
+    let criteriaList = (await client.query(
+      "SELECT * FROM evaluation_criteria WHERE scoring_version = $1 AND is_active = TRUE ORDER BY sort_order ASC",
+      [scoringVersion]
     )).rows;
+
+    if (criteriaList.length === 0) {
+      criteriaList = (await client.query(
+        "SELECT * FROM evaluation_criteria WHERE period_type = 'MONTHLY_PRESENTATION' AND is_active = TRUE ORDER BY sort_order ASC"
+      )).rows;
+    }
     const criteriaByKey = new Map(criteriaList.map((c) => [c.key, c]));
 
     const scoreMap = new Map();
+    const seenKeys = new Set();
     for (const item of rawScores) {
-      const key = String(item.criteriaKey || item.criteria_key || "").trim();
+      const key = String(item.criteriaKey || item.criteria_key || item.key || "").trim();
+      if (!key) {
+        throw createHttpError("Kriteria penilaian tidak boleh kosong.", 400);
+      }
+      if (seenKeys.has(key)) {
+        throw createHttpError(`Duplikat kriteria '${key}' pada penilaian.`, 400);
+      }
+      seenKeys.add(key);
+
+      if (!criteriaByKey.has(key)) {
+        throw createHttpError(`Kriteria '${key}' tidak dikenali untuk versi penilaian ${scoringVersion}.`, 400);
+      }
+
       const numScore = Number(item.score);
-      if (item.score != null && (isNaN(numScore) || numScore < 1.0 || numScore > 10.0)) {
+      if (item.score == null || item.score === "" || isNaN(numScore) || numScore < 1.0 || numScore > 10.0) {
         throw createHttpError(`Nilai untuk kriteria '${key}' harus berupa angka antara 1.0 dan 10.0.`, 400);
       }
-      if (key && criteriaByKey.has(key)) {
-        scoreMap.set(key, {
-          criteria: criteriaByKey.get(key),
-          score: Math.round(numScore * 100) / 100,
-          notes: item.notes ? String(item.notes).trim() : null
-        });
-      }
+
+      scoreMap.set(key, {
+        criteria: criteriaByKey.get(key),
+        score: Math.round(numScore * 100) / 100,
+        notes: item.notes ? String(item.notes).trim() : null
+      });
     }
 
-    // If SUBMITTED: all 7 criteria are mandatory
+    // If SUBMITTED: all criteria for this version are mandatory
     if (targetStatus === "SUBMITTED") {
       for (const criteria of criteriaList) {
         if (!scoreMap.has(criteria.key)) {
-          throw createHttpError(`Seluruh 7 kriteria presentasi wajib diisi sebelum submit (kurang: ${criteria.name}).`, 422);
+          throw createHttpError(`Seluruh kriteria (${criteriaList.length}) wajib diisi sebelum submit (kurang: ${criteria.name}).`, 422);
         }
       }
     }
@@ -3250,6 +3954,7 @@ async function getStudentEvaluationHistory(studentIdOrUserId, optionsOrExecutor 
            COALESCE(ea.group_name, ea.division_name, 'Tanpa Divisi') AS division_name,
            ea.status AS assignment_status,
            ep.title AS period_title, ep.status AS period_status, ep.type AS period_type,
+           ep.scoring_version AS period_scoring_version,
            ep.start_date, ep.end_date,
            u.name AS evaluator_name,
            COALESCE(epe.attendance_status, 'PENDING') AS attendance_status,
@@ -3273,6 +3978,7 @@ async function getStudentEvaluationHistory(studentIdOrUserId, optionsOrExecutor 
            slot.topic, slot.notes,
            ps.title AS session_title, ps.session_date,
            ep.id AS period_id, ep.title AS period_title, ep.status AS period_status,
+           ep.scoring_version AS period_scoring_version,
            ep.start_date AS period_start_date,
            (
              SELECT COUNT(*)::int
@@ -3301,6 +4007,8 @@ async function getStudentEvaluationHistory(studentIdOrUserId, optionsOrExecutor 
         periodTitle: row.period_title,
         periodType: row.period_type === "PM_BIWEEKLY" ? "PM_EVALUATION" : (row.period_type || "PM_EVALUATION"),
         periodStatus: row.period_status,
+        scoringVersion: row.period_scoring_version || null,
+        scoring_version: row.period_scoring_version || null,
         startDate: formatDateOnly(row.start_date),
         endDate: formatDateOnly(row.end_date),
         evaluationMonth: row.start_date ? formatDateOnly(row.start_date).slice(0, 7) : null,
@@ -3357,6 +4065,8 @@ async function getStudentEvaluationHistory(studentIdOrUserId, optionsOrExecutor 
       periodTitle: pData.periodTitle,
       periodType: pData.periodType,
       periodStatus: pData.periodStatus,
+      scoringVersion: pData.scoringVersion || null,
+      scoring_version: pData.scoring_version || null,
       evaluationMonth: pData.evaluationMonth,
       resultAvailable,
       startDate: pData.startDate,
@@ -3404,6 +4114,8 @@ async function getStudentEvaluationHistory(studentIdOrUserId, optionsOrExecutor 
         periodTitle: row.period_title,
         periodType: "MONTHLY_PRESENTATION",
         periodStatus: row.period_status,
+        scoringVersion: row.period_scoring_version || null,
+        scoring_version: row.period_scoring_version || null,
         evaluationMonth,
         slotStatus: row.status,
         status: row.status,
@@ -3428,10 +4140,12 @@ module.exports = {
   getEvaluationPeriodById,
   createEvaluationPeriod,
   updateEvaluationPeriod,
+  migratePeriodScoringVersion,
   openEvaluationPeriod,
   closeEvaluationPeriod,
   deleteEvaluationPeriod,
   listEvaluationCriteria,
+  getPeriodCriteria,
   listPmAssignments,
   getPmAssignmentById,
   createPmAssignment,
@@ -3456,8 +4170,13 @@ module.exports = {
   getEvaluationPeriodProgress,
   getEvaluationPeriodRecap,
   getStudentEvaluationHistory,
+  SCORING_VERSIONS,
+  VALID_PERIOD_VERSIONS,
+  DEFAULT_SCORING_VERSION,
   INITIAL_PM_CRITERIA,
   INITIAL_PRESENTATION_CRITERIA,
+  KSA_PM_CRITERIA,
+  KSA_PRESENTATION_CRITERIA,
   validateScoreRange,
   calculateAverageScore,
   checkUserIsPm,
@@ -3482,5 +4201,11 @@ module.exports = {
   updatePeriodEvaluatorAttendance,
   removePeriodEvaluator,
   previewPeriodAssignments,
-  syncPeriodAssignments
+  syncPeriodAssignments,
+  executeEmergencyActionOnPeriod,
+  listEmergencyAudits,
+  createMonitoringGrant,
+  revokeMonitoringGrant,
+  listMonitoringGrants,
+  hasActiveMonitoringGrant
 };

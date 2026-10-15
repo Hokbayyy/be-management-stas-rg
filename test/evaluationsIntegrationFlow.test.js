@@ -32,7 +32,9 @@ test("Final Integration Audit: End-to-End Evaluation Flows", async (t) => {
     std3: `${prefix}-STD-3`,
     project: `${prefix}-PRJ`,
     divA: `${prefix}-DIV-AI`,
-    divB: `${prefix}-DIV-WEB`
+    divB: `${prefix}-DIV-WEB`,
+    dosenA: `${prefix}-DSN-A`,
+    dosenB: `${prefix}-DSN-B`
   };
 
   // Express Test Server
@@ -49,6 +51,12 @@ test("Final Integration Audit: End-to-End Evaluation Flows", async (t) => {
     next();
   });
   app.use("/api/v1/evaluations", evaluationsRouter);
+  app.use((err, req, res, next) => {
+    const status = err.statusCode || err.status || 500;
+    res.status(status).json({
+      message: err.message || "Terjadi kesalahan pada server."
+    });
+  });
 
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, resolve));
@@ -87,8 +95,11 @@ test("Final Integration Audit: End-to-End Evaluation Flows", async (t) => {
         await pool.query("DELETE FROM presentation_evaluators WHERE session_id IN (SELECT id FROM presentation_sessions WHERE period_id = ANY($1))", [createdPeriodIds]);
         await pool.query("DELETE FROM presentation_slots WHERE session_id IN (SELECT id FROM presentation_sessions WHERE period_id = ANY($1))", [createdPeriodIds]);
         await pool.query("DELETE FROM presentation_sessions WHERE period_id = ANY($1)", [createdPeriodIds]);
+        await pool.query("DELETE FROM evaluation_period_evaluators WHERE period_id = ANY($1)", [createdPeriodIds]);
+        await pool.query("DELETE FROM evaluation_emergency_audits WHERE period_id = ANY($1)", [createdPeriodIds]);
         await pool.query("DELETE FROM evaluation_periods WHERE id = ANY($1)", [createdPeriodIds]);
       }
+      await pool.query("DELETE FROM evaluation_monitoring_grants WHERE user_id IN ($1, $2)", [ids.dosenA, ids.dosenB]);
       await pool.query("DELETE FROM evaluation_periods WHERE title LIKE 'Evaluasi PM%' OR title LIKE 'Evaluasi Presentasi%'");
 
       await pool.query("DELETE FROM research_memberships WHERE project_id = $1", [ids.project]);
@@ -96,8 +107,8 @@ test("Final Integration Audit: End-to-End Evaluation Flows", async (t) => {
       await pool.query("DELETE FROM research_projects WHERE id = $1", [ids.project]);
 
       await pool.query("DELETE FROM students WHERE id IN ($1, $2, $3)", [ids.std1, ids.std2, ids.std3]);
-      await pool.query("DELETE FROM users WHERE id IN ($1, $2, $3, $4, $5, $6)", [
-        ids.admin, ids.pmA, ids.pmB, ids.mhs1, ids.mhs2, ids.mhs3
+      await pool.query("DELETE FROM users WHERE id IN ($1, $2, $3, $4, $5, $6, $7, $8)", [
+        ids.admin, ids.pmA, ids.pmB, ids.mhs1, ids.mhs2, ids.mhs3, ids.dosenA, ids.dosenB
       ]);
     } catch (e) {
       // ignore
@@ -118,8 +129,10 @@ test("Final Integration Audit: End-to-End Evaluation Flows", async (t) => {
       ($3, 'PM Divisi Web', 'PW', 'mahasiswa', 'pm.web@test.com', TRUE),
       ($4, 'Mahasiswa 1 (AI)', 'M1', 'mahasiswa', 'mhs1@test.com', TRUE),
       ($5, 'Mahasiswa 2 (Web)', 'M2', 'mahasiswa', 'mhs2@test.com', TRUE),
-      ($6, 'Mahasiswa 3 (Web)', 'M3', 'mahasiswa', 'mhs3@test.com', TRUE)
-    `, [ids.admin, ids.pmA, ids.pmB, ids.mhs1, ids.mhs2, ids.mhs3]);
+      ($6, 'Mahasiswa 3 (Web)', 'M3', 'mahasiswa', 'mhs3@test.com', TRUE),
+      ($7, 'Dosen Reviewer A', 'DA', 'dosen', 'dosen.a@test.com', TRUE),
+      ($8, 'Dosen Reviewer B', 'DB', 'dosen', 'dosen.b@test.com', TRUE)
+    `, [ids.admin, ids.pmA, ids.pmB, ids.mhs1, ids.mhs2, ids.mhs3, ids.dosenA, ids.dosenB]);
 
     // Students
     await pool.query(`
@@ -164,6 +177,7 @@ test("Final Integration Audit: End-to-End Evaluation Flows", async (t) => {
       const res = await api("POST", "/periods", {
         title: "Evaluasi PM Bulanan Oktober",
         type: "PM_EVALUATION",
+        scoringVersion: "PM_V1_7CRITERIA",
         startDate: "2026-10-01",
         endDate: "2026-10-31",
         description: "Periode evaluasi PM bulanan Oktober"
@@ -423,6 +437,7 @@ test("Final Integration Audit: End-to-End Evaluation Flows", async (t) => {
       const createRes = await api("POST", "/periods", {
         title: "Evaluasi Presentasi Bulanan Oktober",
         type: "MONTHLY_PRESENTATION",
+        scoringVersion: "PRESENTATION_V1_7CRITERIA",
         startDate: "2026-10-15",
         endDate: "2026-10-15"
       }, { id: ids.admin, role: "operator" });
@@ -685,6 +700,7 @@ test("Final Integration Audit: End-to-End Evaluation Flows", async (t) => {
       const createRes = await api("POST", "/periods", {
         title: "Evaluasi PM Bulanan November",
         type: "PM_EVALUATION",
+        scoringVersion: "PM_V1_7CRITERIA",
         startDate: "2026-11-01",
         endDate: "2026-11-30",
         description: "Periode evaluasi PM bulanan November"
@@ -838,6 +854,348 @@ test("Final Integration Audit: End-to-End Evaluation Flows", async (t) => {
       assert.ok(novEval);
       assert.equal(novEval.resultAvailable, true);
       assert.equal(Number(novEval.overallScore), 8.5);
+    }
+
+    // -------------------------------------------------------------------------
+    // 4. POLICY 1 & 2 SECURITY POLICIES: EMERGENCY CLOSED & DOSEN VISIBILITY
+    // -------------------------------------------------------------------------
+    {
+      // Scenario 1: CLOSED period cannot be edited via normal operations (409)
+      const normalEditRes = await api("PUT", `/periods/${novPeriodId}`, {
+        title: "Edit Periode CLOSED Ilegal"
+      }, { id: ids.admin, role: "operator" });
+      assert.equal(normalEditRes.status, 409);
+      assert.match(normalEditRes.body.message, /sudah ditutup dan tidak dapat diubah/);
+
+      const normalSyncRes = await api("POST", `/periods/${novPeriodId}/sync-assignments`, {}, {
+        id: ids.admin,
+        role: "operator"
+      });
+      assert.equal(normalSyncRes.status, 409);
+      assert.match(normalSyncRes.body.message, /sudah ditutup/);
+
+      // Scenario 2: Generic force-delete without emergency procedure is rejected (409)
+      const genericDelRes = await api("DELETE", `/periods/${novPeriodId}?force=true`, null, {
+        id: ids.admin,
+        role: "operator"
+      });
+      assert.equal(genericDelRes.status, 409);
+      assert.match(genericDelRes.body.message, /sudah ditutup dan tidak dapat dihapus melalui operasi reguler/);
+
+      // Scenario 3: Emergency action without admin/operator permission is rejected (403)
+      const dosenEmgRes = await api("POST", `/periods/${novPeriodId}/emergency-action`, {
+        action: "EMERGENCY_ARCHIVE",
+        reason: "Dosen trying to perform emergency archive",
+        confirmPeriodTitle: "Evaluasi PM Bulanan November"
+      }, { id: ids.dosenA, role: "dosen" });
+      assert.equal(dosenEmgRes.status, 403);
+
+      const mhsEmgRes = await api("POST", `/periods/${novPeriodId}/emergency-action`, {
+        action: "EMERGENCY_ARCHIVE",
+        reason: "Mahasiswa trying to perform emergency archive",
+        confirmPeriodTitle: "Evaluasi PM Bulanan November"
+      }, { id: ids.mhs1, role: "mahasiswa" });
+      assert.equal(mhsEmgRes.status, 403);
+
+      // Scenario 4: Emergency action validation (reason >= 10 chars, valid action, title confirmation) (422)
+      const shortReasonRes = await api("POST", `/periods/${novPeriodId}/emergency-action`, {
+        action: "EMERGENCY_ARCHIVE",
+        reason: "pendek",
+        confirmPeriodTitle: "Evaluasi PM Bulanan November"
+      }, { id: ids.admin, role: "operator" });
+      assert.equal(shortReasonRes.status, 422);
+      assert.match(shortReasonRes.body.message, /minimal 10 karakter/);
+
+      const invalidActionRes = await api("POST", `/periods/${novPeriodId}/emergency-action`, {
+        action: "INVALID_ACTION",
+        reason: "Alasan yang cukup panjang tetapi aksi tidak valid",
+        confirmPeriodTitle: "Evaluasi PM Bulanan November"
+      }, { id: ids.admin, role: "operator" });
+      assert.equal(invalidActionRes.status, 422);
+
+      const wrongTitleRes = await api("POST", `/periods/${novPeriodId}/emergency-action`, {
+        action: "EMERGENCY_ARCHIVE",
+        reason: "Alasan yang cukup panjang tetapi salah konfirmasi judul",
+        confirmPeriodTitle: "Judul Yang Salah"
+      }, { id: ids.admin, role: "operator" });
+      assert.equal(wrongTitleRes.status, 422);
+
+      // Scenario 5: Valid emergency action creates persistent audit record (200)
+      const validArchiveRes = await api("POST", `/periods/${novPeriodId}/emergency-action`, {
+        action: "EMERGENCY_ARCHIVE",
+        reason: "Instruksi audit darurat dekanat untuk pembekuan periode",
+        confirmPeriodTitle: "Evaluasi PM Bulanan November"
+      }, { id: ids.admin, role: "operator" });
+      assert.equal(validArchiveRes.status, 200);
+      assert.equal(validArchiveRes.body.success, true);
+      assert.ok(validArchiveRes.body.auditId);
+
+      // Verify audit list endpoint
+      const auditListRes = await api("GET", `/emergency-audits?periodId=${novPeriodId}`, null, {
+        id: ids.admin,
+        role: "operator"
+      });
+      assert.equal(auditListRes.status, 200);
+      assert.ok(auditListRes.body.audits.length > 0);
+      assert.equal(auditListRes.body.audits[0].action_type, "EMERGENCY_ARCHIVE");
+      assert.equal(auditListRes.body.audits[0].execution_status, "SUCCESS");
+
+      // Scenario 6: Historical audit survives physical EMERGENCY_DELETE of period
+      // Create a temporary period, close it, then emergency delete it
+      const delPeriodRes = await api("POST", "/periods", {
+        title: "Evaluasi PM Darurat Delete",
+        type: "PM_EVALUATION",
+        startDate: "2026-12-01",
+        endDate: "2026-12-31"
+      }, { id: ids.admin, role: "operator" });
+      assert.equal(delPeriodRes.status, 201);
+      const emgDelPeriodId = delPeriodRes.body.period.id;
+      createdPeriodIds.push(emgDelPeriodId);
+
+      // Explicitly transition to CLOSED status for emergency deletion scenario
+      await pool.query("UPDATE evaluation_periods SET status = 'CLOSED' WHERE id = $1", [emgDelPeriodId]);
+
+      const emgDeleteRes = await api("POST", `/periods/${emgDelPeriodId}/emergency-action`, {
+        action: "EMERGENCY_DELETE",
+        reason: "Pembatalan darurat periode akibat kesalahan administrasi fatal",
+        confirmPeriodTitle: "Evaluasi PM Darurat Delete"
+      }, { id: ids.admin, role: "operator" });
+      assert.equal(emgDeleteRes.status, 200);
+      assert.equal(emgDeleteRes.body.success, true);
+
+      // Period is now deleted from DB
+      const checkDeletedPeriod = await api("GET", `/periods/${emgDelPeriodId}`, null, { id: ids.admin, role: "operator" });
+      assert.equal(checkDeletedPeriod.status, 404);
+
+      // BUT audit record is PRESERVED!
+      const checkSurvivingAudit = await api("GET", `/emergency-audits?periodId=${emgDelPeriodId}`, null, {
+        id: ids.admin,
+        role: "operator"
+      });
+      assert.equal(checkSurvivingAudit.status, 200);
+      assert.equal(checkSurvivingAudit.body.audits.length, 1);
+      assert.equal(checkSurvivingAudit.body.audits[0].action_type, "EMERGENCY_DELETE");
+      assert.equal(checkSurvivingAudit.body.audits[0].period_id, emgDelPeriodId);
+
+      // -------------------------------------------------------------------------
+      // POLICY 2: DOSEN PM VISIBILITY & MONITORING GRANTS FLOW
+      // -------------------------------------------------------------------------
+      // Create January 2027 period where Dosen A is a PM evaluator
+      const janPeriodRes = await api("POST", "/periods", {
+        title: "Evaluasi PM Bulanan Januari 2027",
+        type: "PM_EVALUATION",
+        startDate: "2027-01-01",
+        endDate: "2027-01-31"
+      }, { id: ids.admin, role: "operator" });
+      assert.equal(janPeriodRes.status, 201);
+      const janPeriodId = janPeriodRes.body.period.id;
+      createdPeriodIds.push(janPeriodId);
+
+      // Set period status to OPEN
+      await pool.query("UPDATE evaluation_periods SET status = 'OPEN' WHERE id = $1", [janPeriodId]);
+
+      // Add Dosen A and PM B as evaluators
+      await api("POST", `/periods/${janPeriodId}/evaluators`, { evaluatorId: ids.dosenA }, { id: ids.admin, role: "operator" });
+      await api("POST", `/periods/${janPeriodId}/evaluators`, { evaluatorId: ids.pmB }, { id: ids.admin, role: "operator" });
+
+      // Set attendance to PRESENT for both
+      await api("PUT", `/periods/${janPeriodId}/evaluators/${ids.dosenA}/attendance`, { attendanceStatus: "PRESENT" }, { id: ids.admin, role: "operator" });
+      await api("PUT", `/periods/${janPeriodId}/evaluators/${ids.pmB}/attendance`, { attendanceStatus: "PRESENT" }, { id: ids.admin, role: "operator" });
+
+      // Create assignments:
+      // Dosen A -> Student 1
+      // PM B -> Student 2
+      const asnDosenRes = await api("POST", "/pm/assignments", {
+        periodId: janPeriodId,
+        studentId: ids.std1,
+        evaluatorId: ids.dosenA,
+        divisionId: ids.divA
+      }, { id: ids.admin, role: "operator" });
+      assert.equal(asnDosenRes.status, 201);
+      const dosenAssignmentId = asnDosenRes.body.assignment.id;
+
+      const asnPmBRes = await api("POST", "/pm/assignments", {
+        periodId: janPeriodId,
+        studentId: ids.std2,
+        evaluatorId: ids.pmB,
+        divisionId: ids.divB
+      }, { id: ids.admin, role: "operator" });
+      assert.equal(asnPmBRes.status, 201);
+      const pmBAssignmentId = asnPmBRes.body.assignment.id;
+
+      // Scenario 8: Dosen PM reading own assignment when OPEN is allowed (200)
+      const dosenReadOwnRes = await api("GET", `/pm/assignments/${dosenAssignmentId}`, null, {
+        id: ids.dosenA,
+        role: "dosen"
+      });
+      assert.equal(dosenReadOwnRes.status, 200);
+      assert.equal(dosenReadOwnRes.body.assignment.id, dosenAssignmentId);
+
+      const dosenListOwnRes = await api("GET", `/pm/assignments?periodId=${janPeriodId}`, null, {
+        id: ids.dosenA,
+        role: "dosen"
+      });
+      assert.equal(dosenListOwnRes.status, 200);
+      assert.equal(dosenListOwnRes.body.assignments.length, 1);
+      assert.equal(dosenListOwnRes.body.assignments[0].evaluatorId, ids.dosenA);
+
+      // Scenario 9: Dosen PM reading other PM assignment when OPEN is rejected (403)
+      const dosenReadOtherOpenRes = await api("GET", `/pm/assignments/${pmBAssignmentId}`, null, {
+        id: ids.dosenA,
+        role: "dosen"
+      });
+      assert.equal(dosenReadOtherOpenRes.status, 403);
+      assert.match(dosenReadOtherOpenRes.body.message, /belum CLOSED/);
+
+      const dosenFilterOtherOpenRes = await api("GET", `/pm/assignments?periodId=${janPeriodId}&evaluatorId=${ids.pmB}`, null, {
+        id: ids.dosenA,
+        role: "dosen"
+      });
+      assert.equal(dosenFilterOtherOpenRes.status, 403);
+      assert.match(dosenFilterOtherOpenRes.body.message, /belum CLOSED/);
+
+      // Scenario 14: Admin monitoring works, but Admin submit on PM assignment returns 403
+      const adminReadPmRes = await api("GET", `/pm/assignments/${pmBAssignmentId}`, null, {
+        id: ids.admin,
+        role: "operator"
+      });
+      assert.equal(adminReadPmRes.status, 200);
+
+      const adminSubmitRes = await api("PUT", `/pm/assignments/${pmBAssignmentId}/submission`, {
+        status: "SUBMITTED",
+        scores: [
+          { criteriaKey: "quality_of_work", score: 8.0 },
+          { criteriaKey: "responsibility", score: 8.0 },
+          { criteriaKey: "technical_skill", score: 8.0 },
+          { criteriaKey: "problem_solving", score: 8.0 },
+          { criteriaKey: "collaboration", score: 8.0 },
+          { criteriaKey: "initiative", score: 8.0 },
+          { criteriaKey: "research_contribution", score: 8.0 }
+        ]
+      }, { id: ids.admin, role: "operator" });
+      assert.equal(adminSubmitRes.status, 403);
+      assert.match(adminSubmitRes.body.message, /tidak berhak menilai/);
+
+      // Now PM B submits evaluation for Student 2
+      await api("PUT", `/pm/assignments/${pmBAssignmentId}/submission`, {
+        status: "SUBMITTED",
+        scores: [
+          { criteriaKey: "quality_of_work", score: 8.5 },
+          { criteriaKey: "responsibility", score: 8.5 },
+          { criteriaKey: "technical_skill", score: 8.5 },
+          { criteriaKey: "problem_solving", score: 8.5 },
+          { criteriaKey: "collaboration", score: 8.5 },
+          { criteriaKey: "initiative", score: 8.5 },
+          { criteriaKey: "research_contribution", score: 8.5 }
+        ]
+      }, { id: ids.pmB, role: "mahasiswa" });
+
+      // Dosen A submits evaluation for Student 1
+      await api("PUT", `/pm/assignments/${dosenAssignmentId}/submission`, {
+        status: "SUBMITTED",
+        scores: [
+          { criteriaKey: "quality_of_work", score: 9.0 },
+          { criteriaKey: "responsibility", score: 9.0 },
+          { criteriaKey: "technical_skill", score: 9.0 },
+          { criteriaKey: "problem_solving", score: 9.0 },
+          { criteriaKey: "collaboration", score: 9.0 },
+          { criteriaKey: "initiative", score: 9.0 },
+          { criteriaKey: "research_contribution", score: 9.0 }
+        ]
+      }, { id: ids.dosenA, role: "dosen" });
+
+      // Close January period
+      await api("POST", `/periods/${janPeriodId}/close`, { force: true }, { id: ids.admin, role: "operator" });
+
+      // Scenario 10: Dosen PM reading other PM after CLOSED WITHOUT grant returns 403
+      const dosenReadWithoutGrant = await api("GET", `/pm/assignments/${pmBAssignmentId}`, null, {
+        id: ids.dosenA,
+        role: "dosen"
+      });
+      assert.equal(dosenReadWithoutGrant.status, 403);
+      assert.match(dosenReadWithoutGrant.body.message, /izin monitoring/);
+
+      const dosenRecapWithoutGrant = await api("GET", `/periods/${janPeriodId}/recap`, null, {
+        id: ids.dosenA,
+        role: "dosen"
+      });
+      assert.equal(dosenRecapWithoutGrant.status, 403);
+
+      const dosenProgressWithoutGrant = await api("GET", `/periods/${janPeriodId}/progress`, null, {
+        id: ids.dosenA,
+        role: "dosen"
+      });
+      assert.equal(dosenProgressWithoutGrant.status, 403);
+
+      // Scenario 11: Dosen PM reading other PM after CLOSED WITH active grant returns 200
+      const grantCreateRes = await api("POST", "/monitoring-grants", {
+        userId: ids.dosenA,
+        periodId: janPeriodId,
+        reason: "Pemberian izin monitoring resmi dewan dosen"
+      }, { id: ids.admin, role: "operator" });
+      assert.equal(grantCreateRes.status, 201);
+      const grantId = grantCreateRes.body.grant.id;
+
+      const dosenReadWithGrant = await api("GET", `/pm/assignments/${pmBAssignmentId}`, null, {
+        id: ids.dosenA,
+        role: "dosen"
+      });
+      assert.equal(dosenReadWithGrant.status, 200);
+      assert.equal(dosenReadWithGrant.body.assignment.id, pmBAssignmentId);
+
+      const dosenRecapWithGrant = await api("GET", `/periods/${janPeriodId}/recap`, null, {
+        id: ids.dosenA,
+        role: "dosen"
+      });
+      assert.equal(dosenRecapWithGrant.status, 200);
+
+      const dosenProgressWithGrant = await api("GET", `/periods/${janPeriodId}/progress`, null, {
+        id: ids.dosenA,
+        role: "dosen"
+      });
+      assert.equal(dosenProgressWithGrant.status, 200);
+
+      // Scenario 12: Dosen with REVOKED grant returns 403
+      const revokeGrantRes = await api("DELETE", `/monitoring-grants/${grantId}`, null, {
+        id: ids.admin,
+        role: "operator"
+      });
+      assert.equal(revokeGrantRes.status, 200);
+
+      const dosenReadRevoked = await api("GET", `/pm/assignments/${pmBAssignmentId}`, null, {
+        id: ids.dosenA,
+        role: "dosen"
+      });
+      assert.equal(dosenReadRevoked.status, 403);
+      assert.match(dosenReadRevoked.body.message, /izin monitoring/);
+
+      const dosenRecapRevoked = await api("GET", `/periods/${janPeriodId}/recap`, null, {
+        id: ids.dosenA,
+        role: "dosen"
+      });
+      assert.equal(dosenRecapRevoked.status, 403);
+
+      // Scenario 13: Dosen cannot access results OUT OF SCOPE of grant (403)
+      // Grant given specifically for novPeriodId
+      await api("POST", "/monitoring-grants", {
+        userId: ids.dosenB,
+        periodId: novPeriodId,
+        reason: "Izin khusus periode November saja"
+      }, { id: ids.admin, role: "operator" });
+
+      // Dosen B attempts to access janPeriodId -> 403
+      const dosenOutScopeRes = await api("GET", `/periods/${janPeriodId}/recap`, null, {
+        id: ids.dosenB,
+        role: "dosen"
+      });
+      assert.equal(dosenOutScopeRes.status, 403);
+
+      // Dosen B attempts to access novPeriodId (within scope) -> 200
+      const dosenInScopeRes = await api("GET", `/periods/${novPeriodId}/recap`, null, {
+        id: ids.dosenB,
+        role: "dosen"
+      });
+      assert.equal(dosenInScopeRes.status, 200);
     }
 
   } finally {

@@ -7,10 +7,12 @@ const {
   getEvaluationPeriodById,
   createEvaluationPeriod,
   updateEvaluationPeriod,
+  migratePeriodScoringVersion,
   openEvaluationPeriod,
   closeEvaluationPeriod,
   deleteEvaluationPeriod,
   listEvaluationCriteria,
+  getPeriodCriteria,
   listPmAssignments,
   getPmAssignmentById,
   createPmAssignment,
@@ -53,7 +55,13 @@ const {
   updatePeriodEvaluatorAttendance,
   removePeriodEvaluator,
   previewPeriodAssignments,
-  syncPeriodAssignments
+  syncPeriodAssignments,
+  executeEmergencyActionOnPeriod,
+  listEmergencyAudits,
+  createMonitoringGrant,
+  revokeMonitoringGrant,
+  listMonitoringGrants,
+  hasActiveMonitoringGrant
 } = require("../../utils/evaluationService");
 const { resolveStudentId, resolveStudentRecord } = require("../../utils/studentResolver");
 
@@ -147,6 +155,31 @@ const handleUpdatePeriod = asyncHandler(async (req, res) => {
 router.patch("/periods/:id", handleUpdatePeriod);
 router.put("/periods/:id", handleUpdatePeriod);
 
+router.get(
+  "/periods/:id/criteria",
+  asyncHandler(async (req, res) => {
+    if (!requireAuth(req, res)) return;
+    const id = requireSafeId(req.params.id, "id");
+    const criteriaData = await getPeriodCriteria(id);
+    res.json(criteriaData);
+  })
+);
+
+router.post(
+  "/periods/:id/migrate-scoring-version",
+  asyncHandler(async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = requireSafeId(req.params.id, "id");
+    const { targetVersion, scoringVersion, reason } = req.body || {};
+    const versionToApply = targetVersion || scoringVersion;
+    if (!versionToApply) {
+      return res.status(400).json({ message: "targetVersion wajib diisi." });
+    }
+    const period = await migratePeriodScoringVersion(id, versionToApply, { reason }, req.authUser);
+    res.json({ message: "Versi penilaian periode berhasil diperbarui.", period });
+  })
+);
+
 router.post(
   "/periods/:id/open",
   asyncHandler(async (req, res) => {
@@ -177,6 +210,68 @@ router.delete(
     const force = req.query.force === "true" || req.body?.force === true;
     const result = await deleteEvaluationPeriod(id, { force });
     res.json(result);
+  })
+);
+
+router.post(
+  "/periods/:id/emergency-action",
+  asyncHandler(async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = requireSafeId(req.params.id, "id");
+    const result = await executeEmergencyActionOnPeriod(id, req.body, req.authUser);
+    res.json(result);
+  })
+);
+
+router.get(
+  "/emergency-audits",
+  asyncHandler(async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const periodId = req.query.periodId ? String(req.query.periodId) : null;
+    const audits = await listEmergencyAudits({ periodId });
+    res.json({ audits });
+  })
+);
+
+router.get(
+  "/monitoring-grants",
+  asyncHandler(async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const { userId, periodId, groupId, isActive } = req.query;
+    const grants = await listMonitoringGrants({
+      userId: userId ? String(userId) : null,
+      periodId: periodId ? String(periodId) : null,
+      groupId: groupId ? String(groupId) : null,
+      isActive: isActive !== undefined ? isActive === "true" : null
+    });
+    res.json({ grants });
+  })
+);
+
+router.post(
+  "/monitoring-grants",
+  asyncHandler(async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const { userId, periodId, groupId, reason } = req.body;
+    if (!userId) return res.status(400).json({ message: "userId wajib diisi." });
+    const grant = await createMonitoringGrant({
+      userId,
+      periodId: periodId ? String(periodId) : null,
+      groupId: groupId ? String(groupId) : null,
+      reason: reason ? String(reason).trim() : null,
+      grantedBy: req.authUser?.id || null
+    });
+    res.status(201).json({ message: "Izin monitoring berhasil diberikan.", grant });
+  })
+);
+
+router.delete(
+  "/monitoring-grants/:id",
+  asyncHandler(async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    const id = requireSafeId(req.params.id, "id");
+    const grant = await revokeMonitoringGrant(id, req.authUser?.id || null);
+    res.json({ message: "Izin monitoring berhasil dicabut.", grant });
   })
 );
 
@@ -250,13 +345,39 @@ router.get(
   "/periods/:id/progress",
   asyncHandler(async (req, res) => {
     if (!requireAuth(req, res)) return;
-    const { isStudent } = getRequester(req);
+    const { isOperator, isDosen, isStudent, userId } = getRequester(req);
     if (isStudent) {
       return res.status(403).json({ message: "Akses ditolak. Mahasiswa tidak dapat melihat progres penilaian periode." });
     }
     const id = requireSafeId(req.params.id, "id");
-    const progress = await getEvaluationPeriodProgress(id);
-    res.json(progress);
+    const period = await getEvaluationPeriodById(id);
+    if (!period) return res.status(404).json({ message: "Periode evaluasi tidak ditemukan." });
+
+    if (isOperator) {
+      const progress = await getEvaluationPeriodProgress(id);
+      return res.json(progress);
+    }
+
+    if (isDosen) {
+      if (period.status !== "CLOSED") {
+        return res.status(403).json({
+          message: "Akses ditolak. Progres penilaian periode hanya dapat diakses oleh dosen setelah periode berstatus CLOSED."
+        });
+      }
+      const hasGrant = await hasActiveMonitoringGrant(userId, {
+        periodId: id,
+        groupId: period.group_id
+      });
+      if (!hasGrant) {
+        return res.status(403).json({
+          message: "Akses ditolak. Anda tidak memiliki izin monitoring untuk periode ini."
+        });
+      }
+      const progress = await getEvaluationPeriodProgress(id);
+      return res.json(progress);
+    }
+
+    return res.status(403).json({ message: "Akses ditolak." });
   })
 );
 
@@ -264,13 +385,39 @@ router.get(
   "/periods/:id/recap",
   asyncHandler(async (req, res) => {
     if (!requireAuth(req, res)) return;
-    const { isStudent } = getRequester(req);
+    const { isOperator, isDosen, isStudent, userId } = getRequester(req);
     if (isStudent) {
       return res.status(403).json({ message: "Akses ditolak. Mahasiswa tidak dapat melihat rekap penilaian periode." });
     }
     const id = requireSafeId(req.params.id, "id");
-    const recap = await getEvaluationPeriodRecap(id);
-    res.json(recap);
+    const period = await getEvaluationPeriodById(id);
+    if (!period) return res.status(404).json({ message: "Periode evaluasi tidak ditemukan." });
+
+    if (isOperator) {
+      const recap = await getEvaluationPeriodRecap(id);
+      return res.json(recap);
+    }
+
+    if (isDosen) {
+      if (period.status !== "CLOSED") {
+        return res.status(403).json({
+          message: "Akses ditolak. Rekap penilaian periode hanya dapat diakses oleh dosen setelah periode berstatus CLOSED."
+        });
+      }
+      const hasGrant = await hasActiveMonitoringGrant(userId, {
+        periodId: id,
+        groupId: period.group_id
+      });
+      if (!hasGrant) {
+        return res.status(403).json({
+          message: "Akses ditolak. Anda tidak memiliki izin monitoring untuk periode ini."
+        });
+      }
+      const recap = await getEvaluationPeriodRecap(id);
+      return res.json(recap);
+    }
+
+    return res.status(403).json({ message: "Akses ditolak." });
   })
 );
 
@@ -283,7 +430,8 @@ router.get(
   asyncHandler(async (req, res) => {
     if (!requireAuth(req, res)) return;
     const periodType = req.query.periodType || req.query.type || null;
-    const criteria = await listEvaluationCriteria(periodType);
+    const scoringVersion = req.query.scoringVersion || req.query.scoring_version || null;
+    const criteria = await listEvaluationCriteria({ periodType, scoringVersion });
     res.json({ criteria });
   })
 );
@@ -428,23 +576,68 @@ router.get(
   "/pm/assignments",
   asyncHandler(async (req, res) => {
     if (!requireAuth(req, res)) return;
-    const { isOperator, userId } = getRequester(req);
+    const { isOperator, isDosen, userId } = getRequester(req);
     const { periodId, groupId, divisionId, status } = req.query;
     if (!periodId) return res.status(400).json({ message: "periodId wajib diisi." });
 
-    if (!isOperator) {
+    const period = await getEvaluationPeriodById(String(periodId));
+    if (!period) return res.status(404).json({ message: "Periode evaluasi tidak ditemukan." });
+
+    let targetEvaluatorId = null;
+
+    if (isOperator) {
+      targetEvaluatorId = req.query.evaluatorId || null;
+    } else if (isDosen) {
+      const isPm = await checkUserIsPm(userId, String(periodId));
+      const requestedOtherEvaluator = Boolean(req.query.evaluatorId && req.query.evaluatorId !== userId);
+
+      if (period.status !== "CLOSED") {
+        if (requestedOtherEvaluator) {
+          return res.status(403).json({
+            message: "Akses ditolak. Dosen tidak dapat melihat penugasan PM lain saat periode belum CLOSED."
+          });
+        }
+        if (!isPm) {
+          return res.status(403).json({
+            message: "Akses ditolak. Anda tidak terdaftar sebagai Project Manager pada periode ini."
+          });
+        }
+        targetEvaluatorId = userId;
+      } else {
+        const hasGrant = await hasActiveMonitoringGrant(userId, {
+          periodId: String(periodId),
+          groupId: period.group_id
+        });
+
+        if (requestedOtherEvaluator || !isPm) {
+          if (!hasGrant) {
+            return res.status(403).json({
+              message: "Akses ditolak. Anda tidak memiliki izin monitoring untuk periode ini."
+            });
+          }
+          targetEvaluatorId = req.query.evaluatorId || null;
+        } else {
+          targetEvaluatorId = hasGrant ? (req.query.evaluatorId || null) : userId;
+        }
+      }
+    } else {
       const isPm = await checkUserIsPm(userId, String(periodId));
       if (!isPm) {
-        return res.status(403).json({ message: "Akses ditolak. Anda tidak terdaftar sebagai Project Manager pada periode ini." });
+        return res.status(403).json({
+          message: "Akses ditolak. Anda tidak terdaftar sebagai Project Manager pada periode ini."
+        });
       }
+      if (req.query.evaluatorId && req.query.evaluatorId !== userId) {
+        return res.status(403).json({
+          message: "Akses ditolak. Anda tidak berhak melihat penugasan PM lain."
+        });
+      }
+      targetEvaluatorId = userId;
     }
-
-    // Only operator can filter by another evaluatorId; PMs strictly see only their own
-    const evaluatorId = isOperator ? (req.query.evaluatorId || null) : userId;
 
     const assignments = await listPmAssignments({
       periodId: String(periodId),
-      evaluatorId,
+      evaluatorId: targetEvaluatorId,
       groupId: groupId || null,
       divisionId: divisionId || null,
       status: status || null
@@ -471,12 +664,43 @@ router.get(
     const assignment = await getPmAssignmentById(id);
     if (!assignment) return res.status(404).json({ message: "Penugasan evaluasi tidak ditemukan." });
 
-    const { isOperator, userId } = getRequester(req);
-    if (!isOperator && assignment.evaluator_id !== userId) {
-      return res.status(403).json({ message: "Akses ditolak. Anda tidak berhak melihat penugasan ini." });
+    const { isOperator, isDosen, userId } = getRequester(req);
+
+    // 1. Evaluator reads own assignment: always allowed
+    if (assignment.evaluator_id === userId) {
+      return res.json({ assignment });
     }
 
-    res.json({ assignment });
+    // 2. Admin / Operator monitoring: allowed
+    if (isOperator) {
+      return res.json({ assignment });
+    }
+
+    // 3. Dosen reading other PM's assignment:
+    // Only allowed if period is CLOSED AND has active monitoring grant
+    if (isDosen) {
+      if (assignment.period_status !== "CLOSED") {
+        return res.status(403).json({
+          message: "Akses ditolak. Dosen tidak dapat melihat penugasan PM lain saat periode belum CLOSED."
+        });
+      }
+
+      const hasGrant = await hasActiveMonitoringGrant(userId, {
+        periodId: assignment.period_id,
+        groupId: assignment.group_id || assignment.groupId
+      });
+
+      if (!hasGrant) {
+        return res.status(403).json({
+          message: "Akses ditolak. Anda tidak memiliki izin monitoring untuk melihat penugasan ini."
+        });
+      }
+
+      return res.json({ assignment });
+    }
+
+    // 4. Mahasiswa or others attempting to read other's assignment: 403
+    return res.status(403).json({ message: "Akses ditolak. Anda tidak berhak melihat penugasan ini." });
   })
 );
 
