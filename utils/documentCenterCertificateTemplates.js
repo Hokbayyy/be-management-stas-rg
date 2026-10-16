@@ -640,15 +640,31 @@ async function generateCertificateDraft({ id, authUser, ip }) {
       `
       SELECT cp.*, c.legacy_student_id, c.student_key, c.student_snapshot, c.activity_type,
              c.period_key, c.period_snapshot, c.outcome, c.case_status,
-             gsp.position_label AS graduation_position_label,
-             rm.peran AS rm_peran
+             (
+               SELECT BTRIM(gsp.position_label)
+               FROM graduation_submission_projects gsp
+               WHERE gsp.student_id = c.legacy_student_id
+                 AND gsp.project_id = cp.legacy_project_id
+                 AND BTRIM(COALESCE(gsp.position_label, '')) <> ''
+                 AND LOWER(BTRIM(gsp.position_label)) <> 'alumni'
+               LIMIT 1
+             ) AS graduation_position_label,
+             (
+               SELECT BTRIM(rm.peran)
+               FROM students s
+               JOIN research_memberships rm
+                 ON rm.user_id = s.user_id
+                AND rm.project_id = cp.legacy_project_id
+                AND rm.member_type = 'Mahasiswa'
+               WHERE s.id = c.legacy_student_id
+                 AND BTRIM(COALESCE(rm.peran, '')) <> ''
+                 AND LOWER(BTRIM(rm.peran)) <> 'alumni'
+               LIMIT 1
+             ) AS rm_peran
       FROM dc_final_activity_case_projects cp
       JOIN dc_final_activity_cases c ON c.id = cp.final_activity_case_id
-      LEFT JOIN students s ON s.id = c.legacy_student_id
-      LEFT JOIN graduation_submission_projects gsp ON gsp.student_id = s.id AND gsp.project_id = cp.legacy_project_id
-      LEFT JOIN research_memberships rm ON rm.user_id = s.user_id AND rm.project_id = cp.legacy_project_id
       WHERE cp.id=$1
-      FOR UPDATE OF cp, c
+      FOR UPDATE
       `,
       [caseProjectId]
     );

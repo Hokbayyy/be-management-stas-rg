@@ -56,7 +56,8 @@ const {
   uploadCertificateDraft,
   updateFinalActivityDynamicData,
   cleanupFinalActivityDraftDocuments,
-  cleanupCreatedFinalActivityCases
+  cleanupCreatedFinalActivityCases,
+  healCaseAlumniRoleByDocumentId
 } = require("../../utils/documentCenterFinalActivity");
 const {
   listTemplates,
@@ -333,6 +334,7 @@ router.get(
   requireRoleStrict(["mahasiswa", "operator"]),
   asyncHandler(async (req, res) => {
     const documentId = requireSafeId(req.params.id);
+    await healCaseAlumniRoleByDocumentId(documentId).catch(() => {});
     const role = String(req.authUser?.role || "").trim().toLowerCase();
     let result;
 

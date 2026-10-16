@@ -162,8 +162,16 @@ router.get(
         rp.id AS project_id,
         COALESCE(rp.short_title, rp.title) AS project_name,
         COALESCE(
-          NULLIF(NULLIF(TRIM(gsp.position_label), 'Alumni'), 'alumni'),
-          NULLIF(NULLIF(TRIM(rm_mahasiswa.peran), 'Alumni'), 'alumni'),
+          (
+            SELECT BTRIM(gsp.position_label)
+            FROM graduation_submission_projects gsp
+            WHERE gsp.student_id = s.id
+              AND gsp.project_id = rp.id
+              AND BTRIM(COALESCE(gsp.position_label, '')) <> ''
+              AND LOWER(BTRIM(gsp.position_label)) <> 'alumni'
+            LIMIT 1
+          ),
+          CASE WHEN BTRIM(COALESCE(rm_mahasiswa.peran, '')) = '' OR LOWER(BTRIM(rm_mahasiswa.peran)) = 'alumni' THEN NULL ELSE BTRIM(rm_mahasiswa.peran) END,
           CASE WHEN s.tipe = 'Riset' THEN 'Anggota Riset' ELSE 'Peserta Magang' END
         ) AS student_role,
         cr.requested_by,
@@ -182,7 +190,6 @@ router.get(
       JOIN research_projects rp ON rp.id = rm_mahasiswa.project_id
       JOIN students s ON s.user_id = rm_mahasiswa.user_id
       JOIN users su ON su.id = s.user_id
-      LEFT JOIN graduation_submission_projects gsp ON gsp.student_id = s.id AND gsp.project_id = rp.id
       LEFT JOIN certificate_requests cr ON cr.student_id = s.id AND cr.project_id = rp.id
       LEFT JOIN users ru ON ru.id = cr.requested_by
       LEFT JOIN lecturers l ON l.id = rp.supervisor_lecturer_id

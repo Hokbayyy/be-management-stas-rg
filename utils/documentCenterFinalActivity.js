@@ -316,8 +316,8 @@ async function loadEligibleProjects(client, studentId) {
            rp.period_text AS project_period_text, rp.status AS project_status,
            rm.status AS membership_status,
            COALESCE(
-             NULLIF(NULLIF(TRIM(gsp.position_label), 'Alumni'), 'alumni'),
-             NULLIF(NULLIF(TRIM(rm.peran), 'Alumni'), 'alumni'),
+             CASE WHEN BTRIM(COALESCE(gsp.position_label, '')) = '' OR LOWER(BTRIM(gsp.position_label)) = 'alumni' THEN NULL ELSE BTRIM(gsp.position_label) END,
+             CASE WHEN BTRIM(COALESCE(rm.peran, '')) = '' OR LOWER(BTRIM(rm.peran)) = 'alumni' THEN NULL ELSE BTRIM(rm.peran) END,
              CASE WHEN s.tipe = 'Riset' THEN 'Anggota Riset' ELSE 'Peserta Magang' END
            ) AS project_role,
            gsp.position_label AS graduation_position_label,
@@ -866,8 +866,8 @@ async function listEligible(rawQuery) {
         'title', rp.title,
         'shortTitle', rp.short_title,
         'role', COALESCE(
-          NULLIF(NULLIF(TRIM(gsp.position_label), 'Alumni'), 'alumni'),
-          NULLIF(NULLIF(TRIM(rm.peran), 'Alumni'), 'alumni'),
+          CASE WHEN BTRIM(COALESCE(gsp.position_label, '')) = '' OR LOWER(BTRIM(gsp.position_label)) = 'alumni' THEN NULL ELSE BTRIM(gsp.position_label) END,
+          CASE WHEN BTRIM(COALESCE(rm.peran, '')) = '' OR LOWER(BTRIM(rm.peran)) = 'alumni' THEN NULL ELSE BTRIM(rm.peran) END,
           CASE WHEN ps.tipe = 'Riset' THEN 'Anggota Riset' ELSE 'Peserta Magang' END
         ),
         'status', rp.status,
@@ -1473,16 +1473,30 @@ async function listCases(rawQuery) {
   return { items: result.rows.map(mapCaseRow), pagination: { limit, offset, total: result.rowCount ? Number(result.rows[0].total_count) : 0 } };
 }
 
-async function detailCase(id) {
-  const caseId = safeId(id, "id");
-  const result = await pool.query(`${CASE_SELECT} WHERE c.id = $1 LIMIT 1`, [caseId]);
-  if (!result.rowCount) throw httpError(404, "Case tidak ditemukan.");
-  const projects = await pool.query(
+async function queryCaseProjectsWithResolvedRole(caseId) {
+  return pool.query(
     `
     SELECT cp.*,
            COALESCE(
-             NULLIF(BTRIM(gsp.position_label), ''),
-             CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) = 'alumni' THEN NULL ELSE NULLIF(BTRIM(rm.peran), '') END
+             (
+               SELECT COALESCE(
+                 CASE WHEN BTRIM(COALESCE(gsp.position_label, '')) = '' OR LOWER(BTRIM(gsp.position_label)) = 'alumni' THEN NULL ELSE BTRIM(gsp.position_label) END,
+                 CASE WHEN BTRIM(COALESCE(rm.peran, '')) = '' OR LOWER(BTRIM(rm.peran)) = 'alumni' THEN NULL ELSE BTRIM(rm.peran) END,
+                 CASE WHEN c.activity_type = 'Riset' THEN 'Anggota Riset' ELSE 'Peserta Magang' END
+               )
+               FROM dc_final_activity_cases c
+               LEFT JOIN students s ON s.id = c.legacy_student_id
+               LEFT JOIN graduation_submission_projects gsp
+                 ON gsp.student_id = s.id
+                AND gsp.project_id = cp.legacy_project_id
+               LEFT JOIN research_memberships rm
+                 ON rm.user_id = s.user_id
+                AND rm.project_id = cp.legacy_project_id
+                AND rm.member_type = 'Mahasiswa'
+               WHERE c.id = cp.final_activity_case_id
+               LIMIT 1
+             ),
+             'Peserta Magang'
            ) AS resolved_project_role,
            od.id AS certificate_document_id,
            od.title AS certificate_document_title,
@@ -1491,18 +1505,30 @@ async function detailCase(id) {
            od.current_version_number AS certificate_document_version,
            od.issued_at AS certificate_document_issued_at
     FROM dc_final_activity_case_projects cp
-    LEFT JOIN dc_final_activity_cases c ON c.id = cp.final_activity_case_id
-    LEFT JOIN research_memberships rm ON rm.id = cp.legacy_membership_id
-    LEFT JOIN graduation_submissions gs ON gs.student_id = c.legacy_student_id
-    LEFT JOIN graduation_submission_projects gsp
-      ON gsp.submission_id = gs.id
-     AND gsp.project_id = cp.legacy_project_id
     LEFT JOIN dc_official_documents od ON od.id = cp.certificate_document_id
     WHERE cp.final_activity_case_id = $1
     ORDER BY cp.display_order ASC, cp.id ASC
     `,
     [caseId]
   );
+}
+
+async function detailCase(id) {
+  const caseId = safeId(id, "id");
+  let result = await pool.query(`${CASE_SELECT} WHERE c.id = $1 LIMIT 1`, [caseId]);
+  if (!result.rowCount) throw httpError(404, "Case tidak ditemukan.");
+  let projects = await queryCaseProjectsWithResolvedRole(caseId);
+  const needsAlumniHeal = projects.rows.some((row) => {
+    const snapshotRole = typeof row.project_snapshot?.role === "string" ? row.project_snapshot.role.trim() : "";
+    return (!snapshotRole || snapshotRole.toLowerCase() === "alumni") && row.resolved_project_role;
+  });
+  if (needsAlumniHeal) {
+    const healed = await healCaseAlumniRoleByCaseId(caseId).catch(() => false);
+    if (healed) {
+      result = await pool.query(`${CASE_SELECT} WHERE c.id = $1 LIMIT 1`, [caseId]);
+      projects = await queryCaseProjectsWithResolvedRole(caseId);
+    }
+  }
   return { ...mapCaseRow(result.rows[0]), projects: projects.rows.map(mapProjectRow) };
 }
 
@@ -1844,19 +1870,29 @@ async function updateFinalActivityDynamicData({ id, body, authUser, ip }) {
     const projectResult = await client.query(
       `SELECT cp.*,
               COALESCE(
-                NULLIF(BTRIM(gsp.position_label), ''),
-                CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) = 'alumni' THEN NULL ELSE NULLIF(BTRIM(rm.peran), '') END
+                (
+                  SELECT COALESCE(
+                    CASE WHEN BTRIM(COALESCE(gsp.position_label, '')) = '' OR LOWER(BTRIM(gsp.position_label)) = 'alumni' THEN NULL ELSE BTRIM(gsp.position_label) END,
+                    CASE WHEN BTRIM(COALESCE(rm.peran, '')) = '' OR LOWER(BTRIM(rm.peran)) = 'alumni' THEN NULL ELSE BTRIM(rm.peran) END
+                  )
+                  FROM students s
+                  LEFT JOIN graduation_submission_projects gsp
+                    ON gsp.student_id = s.id
+                   AND gsp.project_id = cp.legacy_project_id
+                  LEFT JOIN research_memberships rm
+                    ON rm.user_id = s.user_id
+                   AND rm.project_id = cp.legacy_project_id
+                   AND rm.member_type = 'Mahasiswa'
+                  WHERE s.id = $2
+                  LIMIT 1
+                ),
+                CASE WHEN $3 = 'Riset' THEN 'Anggota Riset' ELSE 'Peserta Magang' END
               ) AS resolved_project_role
        FROM dc_final_activity_case_projects cp
-       LEFT JOIN research_memberships rm ON rm.id = cp.legacy_membership_id
-       LEFT JOIN graduation_submissions gs ON gs.student_id = $2
-       LEFT JOIN graduation_submission_projects gsp
-         ON gsp.submission_id = gs.id
-        AND gsp.project_id = cp.legacy_project_id
        WHERE cp.final_activity_case_id = $1
        ORDER BY cp.display_order, cp.id
-       FOR UPDATE OF cp`,
-      [caseId, caseRow.legacy_student_id]
+       FOR UPDATE`,
+      [caseId, caseRow.legacy_student_id, caseRow.activity_type]
     );
     if (!projectResult.rowCount) throw httpError(409, "Case belum memiliki project.");
     let projectRows = projectResult.rows.map((row) => {
@@ -1960,6 +1996,134 @@ async function updateFinalActivityDynamicData({ id, body, authUser, ip }) {
   }
 }
 
+async function healCaseAlumniRoleByCaseId(caseId) {
+  const client = await pool.connect();
+  const generatedFiles = [];
+  try {
+    await client.query("BEGIN");
+    const caseResult = await client.query("SELECT * FROM dc_final_activity_cases WHERE id=$1 FOR UPDATE", [caseId]);
+    if (!caseResult.rowCount) {
+      await client.query("ROLLBACK");
+      return false;
+    }
+    const caseRow = caseResult.rows[0];
+    const projectResult = await client.query(
+      `SELECT cp.*,
+              COALESCE(
+                (
+                  SELECT COALESCE(
+                    CASE WHEN BTRIM(COALESCE(gsp.position_label, '')) = '' OR LOWER(BTRIM(gsp.position_label)) = 'alumni' THEN NULL ELSE BTRIM(gsp.position_label) END,
+                    CASE WHEN BTRIM(COALESCE(rm.peran, '')) = '' OR LOWER(BTRIM(rm.peran)) = 'alumni' THEN NULL ELSE BTRIM(rm.peran) END
+                  )
+                  FROM students s
+                  LEFT JOIN graduation_submission_projects gsp
+                    ON gsp.student_id = s.id
+                   AND gsp.project_id = cp.legacy_project_id
+                  LEFT JOIN research_memberships rm
+                    ON rm.user_id = s.user_id
+                   AND rm.project_id = cp.legacy_project_id
+                   AND rm.member_type = 'Mahasiswa'
+                  WHERE s.id = $2
+                  LIMIT 1
+                ),
+                CASE WHEN $3 = 'Riset' THEN 'Anggota Riset' ELSE 'Peserta Magang' END
+              ) AS resolved_project_role
+       FROM dc_final_activity_case_projects cp
+       WHERE cp.final_activity_case_id = $1
+       ORDER BY cp.display_order, cp.id
+       FOR UPDATE`,
+      [caseId, caseRow.legacy_student_id, caseRow.activity_type]
+    );
+    if (!projectResult.rowCount) {
+      await client.query("ROLLBACK");
+      return false;
+    }
+
+    let updatedAny = false;
+    const projectRows = [];
+    for (const row of projectResult.rows) {
+      const snapshotRole = typeof row.project_snapshot?.role === "string" ? row.project_snapshot.role.trim() : "";
+      if ((!snapshotRole || snapshotRole.toLowerCase() === "alumni") && row.resolved_project_role) {
+        const nextProjectSnapshot = { ...(row.project_snapshot || {}), role: row.resolved_project_role };
+        await client.query(
+          `UPDATE dc_final_activity_case_projects
+           SET project_snapshot=$2::jsonb, updated_at=NOW()
+           WHERE id=$1`,
+          [row.id, JSON.stringify(nextProjectSnapshot)]
+        );
+        if (row.certificate_document_id) {
+          await client.query(
+            `UPDATE dc_official_document_students
+             SET participant_role=$2
+             WHERE document_id=$1`,
+            [row.certificate_document_id, row.resolved_project_role]
+          );
+        }
+        updatedAny = true;
+        projectRows.push({ ...row, project_snapshot: nextProjectSnapshot });
+      } else {
+        projectRows.push(row);
+      }
+    }
+
+    if (!updatedAny) {
+      await client.query("ROLLBACK");
+      return false;
+    }
+
+    if (caseRow.completion_document_id && projectRows[0]?.project_snapshot?.role) {
+      await client.query(
+        `UPDATE dc_official_document_students
+         SET participant_role=$2
+         WHERE document_id=$1 AND LOWER(BTRIM(COALESCE(participant_role, ''))) IN ('', 'alumni')`,
+        [caseRow.completion_document_id, projectRows[0].project_snapshot.role]
+      );
+    }
+
+    if (["draft_created", "issued"].includes(caseRow.case_status)) {
+      const completion = await regenerateCompletionDocument(client, { caseRow, projectRows });
+      if (completion?.finalPath) generatedFiles.push(completion.finalPath);
+      for (const projectRow of projectRows) {
+        const certificate = await regenerateCertificateDocument(client, { caseRow, projectRow });
+        if (certificate?.finalPath) generatedFiles.push(certificate.finalPath);
+      }
+    }
+
+    await client.query("COMMIT");
+    return true;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    for (const file of generatedFiles) await fs.unlink(file).catch(() => {});
+    return false;
+  } finally {
+    client.release();
+  }
+}
+
+async function healCaseAlumniRoleByDocumentId(documentId) {
+  if (!documentId) return false;
+  const check = await pool.query(
+    `SELECT final_activity_case_id AS case_id
+     FROM dc_final_activity_case_projects
+     WHERE certificate_document_id = $1
+       AND LOWER(BTRIM(COALESCE(project_snapshot->>'role', ''))) IN ('', 'alumni')
+     UNION
+     SELECT c.id AS case_id
+     FROM dc_final_activity_cases c
+     WHERE c.completion_document_id = $1
+       AND EXISTS (
+         SELECT 1
+         FROM dc_final_activity_case_projects cp
+         WHERE cp.final_activity_case_id = c.id
+           AND LOWER(BTRIM(COALESCE(cp.project_snapshot->>'role', ''))) IN ('', 'alumni')
+       )
+     LIMIT 1`,
+    [documentId]
+  );
+  if (!check.rowCount) return false;
+  return healCaseAlumniRoleByCaseId(check.rows[0].case_id);
+}
+
 async function markIssuedForPublishedDocument(client, { documentId, authUser, ip }) {
   const completion = await client.query("SELECT * FROM dc_final_activity_cases WHERE completion_document_id=$1 FOR UPDATE", [documentId]);
   if (completion.rowCount) {
@@ -2006,5 +2170,7 @@ module.exports = {
   updateFinalActivityDynamicData,
   cleanupFinalActivityDraftDocuments,
   cleanupCreatedFinalActivityCases,
-  markIssuedForPublishedDocument
+  markIssuedForPublishedDocument,
+  healCaseAlumniRoleByCaseId,
+  healCaseAlumniRoleByDocumentId
 };

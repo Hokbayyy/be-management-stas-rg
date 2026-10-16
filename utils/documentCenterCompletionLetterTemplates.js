@@ -586,19 +586,29 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
     const projectResult = await client.query(
       `SELECT cp.*,
               COALESCE(
-                NULLIF(BTRIM(gsp.position_label), ''),
-                CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) = 'alumni' THEN NULL ELSE NULLIF(BTRIM(rm.peran), '') END
+                (
+                  SELECT COALESCE(
+                    CASE WHEN BTRIM(COALESCE(gsp.position_label, '')) = '' OR LOWER(BTRIM(gsp.position_label)) = 'alumni' THEN NULL ELSE BTRIM(gsp.position_label) END,
+                    CASE WHEN BTRIM(COALESCE(rm.peran, '')) = '' OR LOWER(BTRIM(rm.peran)) = 'alumni' THEN NULL ELSE BTRIM(rm.peran) END
+                  )
+                  FROM students s
+                  LEFT JOIN graduation_submission_projects gsp
+                    ON gsp.student_id = s.id
+                   AND gsp.project_id = cp.legacy_project_id
+                  LEFT JOIN research_memberships rm
+                    ON rm.user_id = s.user_id
+                   AND rm.project_id = cp.legacy_project_id
+                   AND rm.member_type = 'Mahasiswa'
+                  WHERE s.id = $2
+                  LIMIT 1
+                ),
+                CASE WHEN $3 = 'Riset' THEN 'Anggota Riset' ELSE 'Peserta Magang' END
               ) AS resolved_project_role
        FROM dc_final_activity_case_projects cp
-       LEFT JOIN research_memberships rm ON rm.id = cp.legacy_membership_id
-       LEFT JOIN graduation_submissions gs ON gs.student_id = $2
-       LEFT JOIN graduation_submission_projects gsp
-         ON gsp.submission_id = gs.id
-        AND gsp.project_id = cp.legacy_project_id
        WHERE cp.final_activity_case_id = $1
        ORDER BY cp.display_order, cp.id
-       FOR SHARE OF cp`,
-      [caseId, caseRow.legacy_student_id]
+       FOR SHARE`,
+      [caseId, caseRow.legacy_student_id, caseRow.activity_type]
     );
     if (projectResult.rowCount < 1) throw httpError(409, "Surat hanya dapat dibuat untuk case yang memiliki project.");
     const projectRows = [];

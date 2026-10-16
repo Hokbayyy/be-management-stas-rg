@@ -65,3 +65,18 @@ test("buildCertificateData produces correct projectRole from snapshot", () => {
   assert.equal(result2.projectRole, "Anggota Riset");
   assert.notEqual(result2.projectRole, "Alumni");
 });
+
+test("documentCenter utilities do not reference non-existent legacy_membership_id column", async () => {
+  const fs = require("node:fs/promises");
+  const path = require("node:path");
+  const files = [
+    "../utils/documentCenterFinalActivity.js",
+    "../utils/documentCenterCertificateTemplates.js",
+    "../utils/documentCenterCompletionLetterTemplates.js"
+  ];
+  for (const rel of files) {
+    const content = await fs.readFile(path.join(__dirname, rel), "utf8");
+    assert.equal(content.includes("legacy_membership_id"), false, `${rel} should not reference legacy_membership_id`);
+  }
+});
+

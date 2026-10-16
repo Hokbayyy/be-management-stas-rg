@@ -71,15 +71,22 @@ async function listStudentProjects(id) {
     SELECT rp.id, rp.title, rp.short_title, rp.period_text, rp.status AS project_status,
            rm.status AS membership_status,
            COALESCE(
-             NULLIF(NULLIF(TRIM(gsp.position_label), 'Alumni'), 'alumni'),
-             NULLIF(NULLIF(TRIM(rm.peran), 'Alumni'), 'alumni'),
+             (
+               SELECT BTRIM(gsp.position_label)
+               FROM graduation_submission_projects gsp
+               WHERE gsp.student_id = s.id
+                 AND gsp.project_id = rp.id
+                 AND BTRIM(COALESCE(gsp.position_label, '')) <> ''
+                 AND LOWER(BTRIM(gsp.position_label)) <> 'alumni'
+               LIMIT 1
+             ),
+             CASE WHEN BTRIM(COALESCE(rm.peran, '')) = '' OR LOWER(BTRIM(rm.peran)) = 'alumni' THEN NULL ELSE BTRIM(rm.peran) END,
              CASE WHEN s.tipe = 'Riset' THEN 'Anggota Riset' ELSE 'Peserta Magang' END
            ) AS peran,
            TO_CHAR(rm.bergabung, 'YYYY-MM-DD') AS joined_at,
            TO_CHAR(rm.selesai, 'YYYY-MM-DD') AS completed_at
     FROM students s JOIN research_memberships rm ON rm.user_id = s.user_id
     JOIN research_projects rp ON rp.id = rm.project_id
-    LEFT JOIN graduation_submission_projects gsp ON gsp.student_id = s.id AND gsp.project_id = rp.id
     WHERE s.id = $1 AND rm.member_type = 'Mahasiswa'
     ORDER BY rp.title ASC, rp.id ASC
   `, [studentId]);
