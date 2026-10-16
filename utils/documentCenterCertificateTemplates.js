@@ -408,9 +408,17 @@ function wrapRichSegments(segments, fonts, size, maxWidth) {
   }).filter((line) => line.length);
 }
 
+function resolveCertificateRole(role, activityType) {
+  const normalized = String(role || "").trim();
+  if (!normalized || normalized.toLowerCase() === "alumni") {
+    return activityType === "Riset" ? "Anggota Riset" : "Peserta Magang";
+  }
+  return normalized;
+}
+
 function buildParagraphSegments(data) {
   const projectTitle = data.projectTitle || "proyek/kegiatan";
-  const role = data.projectRole || (data.activityType === "Riset" ? "anggota riset" : "peserta magang");
+  const role = resolveCertificateRole(data.projectRole, data.activityType);
   if (data.activityType === "Riset") {
     return [
       { text: "Telah berpartisipasi aktif dalam proyek ", bold: false },
@@ -596,12 +604,13 @@ function certificateActivityType(caseRow, projectRow) {
 
 function buildCertificateData(caseRow, projectRow) {
   const activityType = certificateActivityType(caseRow, projectRow);
+  const rawRole = projectRow.project_snapshot?.role || projectRow.project_snapshot?.position;
   return {
     studentName: caseRow.student_snapshot?.name || caseRow.legacy_student_id,
     activityType,
     periodLabel: periodLabel(caseRow.period_snapshot),
     projectTitle: projectRow.project_snapshot?.title || projectRow.project_snapshot?.name || projectRow.legacy_project_id,
-    projectRole: projectRow.project_snapshot?.role || projectRow.project_snapshot?.position || (activityType === "Riset" ? "anggota riset" : "peserta magang")
+    projectRole: resolveCertificateRole(rawRole, activityType)
   };
 }
 
@@ -630,9 +639,14 @@ async function generateCertificateDraft({ id, authUser, ip }) {
     const projectResult = await client.query(
       `
       SELECT cp.*, c.legacy_student_id, c.student_key, c.student_snapshot, c.activity_type,
-             c.period_key, c.period_snapshot, c.outcome, c.case_status
+             c.period_key, c.period_snapshot, c.outcome, c.case_status,
+             gsp.position_label AS graduation_position_label,
+             rm.peran AS rm_peran
       FROM dc_final_activity_case_projects cp
       JOIN dc_final_activity_cases c ON c.id = cp.final_activity_case_id
+      LEFT JOIN students s ON s.id = c.legacy_student_id
+      LEFT JOIN graduation_submission_projects gsp ON gsp.student_id = s.id AND gsp.project_id = cp.legacy_project_id
+      LEFT JOIN research_memberships rm ON rm.user_id = s.user_id AND rm.project_id = cp.legacy_project_id
       WHERE cp.id=$1
       FOR UPDATE OF cp, c
       `,
@@ -642,6 +656,20 @@ async function generateCertificateDraft({ id, authUser, ip }) {
     const row = projectResult.rows[0];
     if (row.outcome !== "completed" || !["Magang", "Riset"].includes(row.activity_type) || row.certificate_required !== true || row.certificate_status !== "pending" || row.certificate_document_id || row.case_status === "revoked") {
       throw httpError(409, "Sertifikat tidak dapat dibuatkan draft generator.");
+    }
+    const resolvedRole = (row.project_snapshot?.role && String(row.project_snapshot.role).trim().toLowerCase() !== "alumni")
+      ? row.project_snapshot.role
+      : (row.graduation_position_label && String(row.graduation_position_label).trim().toLowerCase() !== "alumni")
+        ? row.graduation_position_label
+        : (row.rm_peran && String(row.rm_peran).trim().toLowerCase() !== "alumni")
+          ? row.rm_peran
+          : (row.activity_type === "Riset" ? "Anggota Riset" : "Peserta Magang");
+    if (row.project_snapshot?.role !== resolvedRole) {
+      row.project_snapshot = { ...(row.project_snapshot || {}), role: resolvedRole };
+      await client.query(
+        "UPDATE dc_final_activity_case_projects SET project_snapshot=$2::jsonb, updated_at=NOW() WHERE id=$1",
+        [row.id, JSON.stringify(row.project_snapshot)]
+      );
     }
     const generatedActivityType = certificateActivityType(row, row);
     const certificateData = buildCertificateData(row, row);
@@ -815,14 +843,21 @@ async function renderPublishedCertificateVersion({ client, document, documentNum
   }
   const opened = await openTemplateBackground(template);
   try {
+    const rawCertData = snapshot.certificateData || {};
+    const effectiveActivityType = rawCertData.activityType || (template.activity_type || "Riset");
+    const certData = {
+      ...rawCertData,
+      activityType: effectiveActivityType,
+      projectRole: resolveCertificateRole(rawCertData.projectRole || snapshot.project?.role, effectiveActivityType)
+    };
     const pdfBuffer = await renderCertificatePdf({
       backgroundBytes: opened.bytes,
       templateKey: template.template_key,
-      data: snapshot.certificateData || {},
+      data: certData,
       documentNumber,
       issuedAt
     });
-    return { pdfBuffer, templateVersionId: template.version_id || null, signer: signerSnapshot(), snapshotData: { ...snapshot, publishedDocumentNumber: documentNumber, publishedAt: issuedAt } };
+    return { pdfBuffer, templateVersionId: template.version_id || null, signer: signerSnapshot(), snapshotData: { ...snapshot, certificateData: certData, publishedDocumentNumber: documentNumber, publishedAt: issuedAt } };
   } finally {
     await opened.close();
   }
@@ -836,5 +871,6 @@ module.exports = {
   previewTemplate,
   generateCertificateDraft,
   buildCertificateData,
+  resolveCertificateRole,
   renderPublishedCertificateVersion
 };

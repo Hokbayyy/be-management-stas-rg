@@ -203,7 +203,7 @@ test("graduateStudentDirectly graduates an active student with certificate withh
   // Check that research memberships were updated
   const membershipUpdate = executedQueries.find((q) => q.text.startsWith("UPDATE research_memberships"));
   assert.ok(membershipUpdate, "UPDATE research_memberships query should be executed");
-  assert.ok(membershipUpdate.text.includes("SET peran = 'Alumni'"));
+  assert.ok(membershipUpdate.text.includes("SET status = 'Nonaktif'"));
 
   // Check that graduation submission was updated with certificate_eligible = false
   const submissionUpdate = executedQueries.find((q) => q.text.startsWith("UPDATE graduation_submissions"));

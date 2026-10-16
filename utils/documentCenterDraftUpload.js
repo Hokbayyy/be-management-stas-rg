@@ -386,7 +386,9 @@ async function resolveParticipantSnapshots(participants, definition) {
       periodSnapshot: periodSnapshotData
         ? `${periodSnapshotData.activityType}: ${periodSnapshotData.startDate}${periodSnapshotData.endDate ? ` s.d. ${periodSnapshotData.endDate}` : ""}`
         : null,
-      participantRole: project?.peran || null,
+      participantRole: (project?.peran && project.peran.trim().toLowerCase() !== "alumni")
+        ? project.peran
+        : (student.student_activity_type === "Riset" ? "Anggota Riset" : "Peserta Magang"),
       displayOrder,
       actualActivityType: periodSnapshotData?.activityType || null,
       studentActivityType: student.student_activity_type,
@@ -398,7 +400,9 @@ async function resolveParticipantSnapshots(participants, definition) {
             periodText: project.period_text || null,
             status: project.project_status,
             membershipStatus: project.membership_status,
-            role: project.peran || null,
+            role: (project.peran && project.peran.trim().toLowerCase() !== "alumni")
+              ? project.peran
+              : (student.student_activity_type === "Riset" ? "Anggota Riset" : "Peserta Magang"),
             joinedAt: project.bergabung || null,
             endedAt: project.selesai || null
           }

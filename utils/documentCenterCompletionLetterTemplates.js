@@ -361,12 +361,12 @@ function buildProjectSummary(projectSnapshots) {
   const titles = normalized.map(projectTitleFromSnapshot);
   const roles = normalized
     .map((snapshot) => optionalSafeText(snapshot?.role || snapshot?.position))
-    .filter(Boolean);
+    .filter((r) => r && r.toLowerCase() !== "alumni");
   const uniqueRoles = [...new Set(roles)];
   return {
     title: titles.join(", "),
     titles,
-    role: normalized.length === 1 || uniqueRoles.length === 1 ? uniqueRoles[0] || "peserta magang" : "peserta magang",
+    role: normalized.length === 1 || uniqueRoles.length === 1 ? uniqueRoles[0] || null : null,
     roles: uniqueRoles
   };
 }
@@ -413,7 +413,8 @@ function buildLetterData({ studentSnapshot, periodSnapshot, projectSnapshot, pro
 }
 
 function buildActivityParagraph(data) {
-  const roleText = data.projectRole ? ` dengan peran sebagai ${data.projectRole}` : "";
+  const role = data.projectRole && String(data.projectRole).trim().toLowerCase() !== "alumni" ? data.projectRole : null;
+  const roleText = role ? ` dengan peran sebagai ${role}` : "";
   if (data.activityType === "Riset") {
     return `Yang bersangkutan telah menyelesaikan kegiatan riset di ${safeFallbackText(data.organizationLabel || CONTENT_CONFIG.organizationLabel, "CoE STAS-RG")} sebagai bagian dari proyek "${safeFallbackText(data.projectTitle, "Project belum diisi")}"${roleText}, terhitung sejak ${formatDateId(`${data.periodStart}T00:00:00Z`)} sampai dengan ${formatDateId(`${data.periodEnd}T00:00:00Z`)}.`;
   }
@@ -583,11 +584,37 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
       throw httpError(409, "Case tidak dapat dibuatkan draft surat generator.");
     }
     const projectResult = await client.query(
-      "SELECT * FROM dc_final_activity_case_projects WHERE final_activity_case_id=$1 ORDER BY display_order, id FOR SHARE",
-      [caseId]
+      `SELECT cp.*,
+              COALESCE(
+                NULLIF(BTRIM(gsp.position_label), ''),
+                CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) = 'alumni' THEN NULL ELSE NULLIF(BTRIM(rm.peran), '') END
+              ) AS resolved_project_role
+       FROM dc_final_activity_case_projects cp
+       LEFT JOIN research_memberships rm ON rm.id = cp.legacy_membership_id
+       LEFT JOIN graduation_submissions gs ON gs.student_id = $2
+       LEFT JOIN graduation_submission_projects gsp
+         ON gsp.submission_id = gs.id
+        AND gsp.project_id = cp.legacy_project_id
+       WHERE cp.final_activity_case_id = $1
+       ORDER BY cp.display_order, cp.id
+       FOR SHARE OF cp`,
+      [caseId, caseRow.legacy_student_id]
     );
     if (projectResult.rowCount < 1) throw httpError(409, "Surat hanya dapat dibuat untuk case yang memiliki project.");
-    const projectRows = projectResult.rows;
+    const projectRows = [];
+    for (const row of projectResult.rows) {
+      const snapshotRole = typeof row.project_snapshot?.role === "string" ? row.project_snapshot.role.trim() : "";
+      if ((!snapshotRole || snapshotRole.toLowerCase() === "alumni") && row.resolved_project_role) {
+        const nextSnapshot = { ...(row.project_snapshot || {}), role: row.resolved_project_role };
+        await client.query(
+          "UPDATE dc_final_activity_case_projects SET project_snapshot = $2::jsonb, updated_at = NOW() WHERE id = $1",
+          [row.id, JSON.stringify(nextSnapshot)]
+        );
+        projectRows.push({ ...row, project_snapshot: nextSnapshot });
+      } else {
+        projectRows.push(row);
+      }
+    }
     const primaryProjectRow = projectRows[0];
     const projectSnapshots = projectRows.map((row) => row.project_snapshot);
     const data = buildLetterData({

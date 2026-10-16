@@ -1030,7 +1030,7 @@ router.put(
         await client.query(
           `
           UPDATE research_memberships
-          SET peran = 'Alumni',
+          SET status = 'Nonaktif',
               selesai = COALESCE(selesai, CURRENT_DATE)
           WHERE user_id = $1
             AND member_type = 'Mahasiswa'
