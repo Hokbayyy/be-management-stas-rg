@@ -156,18 +156,26 @@ function mapCaseRow(row) {
   };
 }
 
+function isGenericOrAlumniRole(role) {
+  const normalized = typeof role === "string" ? role.trim().toLowerCase() : "";
+  return !normalized || ["alumni", "anggota", "anggota riset", "peserta magang", "mahasiswa"].includes(normalized);
+}
+
 function mapProjectRow(row) {
   const snapshotRole = typeof row.project_snapshot?.role === "string" ? row.project_snapshot.role.trim() : "";
   const fallbackRole = typeof row.resolved_project_role === "string" ? row.resolved_project_role.trim() : "";
-  const resolvedRole =
-    (!snapshotRole || snapshotRole.toLowerCase() === "alumni")
-      ? (fallbackRole || null)
-      : snapshotRole;
+  const shouldUseFallbackRole =
+    !snapshotRole ||
+    snapshotRole.toLowerCase() === "alumni" ||
+    (isGenericOrAlumniRole(snapshotRole) && fallbackRole && !isGenericOrAlumniRole(fallbackRole));
+  const resolvedRole = shouldUseFallbackRole
+    ? (fallbackRole || snapshotRole || null)
+    : snapshotRole;
   return {
     id: row.id,
     project: {
-      title: row.project_snapshot?.title || null,
-      shortTitle: row.project_snapshot?.shortTitle || null,
+      title: row.project_snapshot?.title || row.resolved_project_title || null,
+      shortTitle: row.project_snapshot?.shortTitle || row.resolved_project_short_title || null,
       status: row.project_snapshot?.status || null,
       role: resolvedRole,
       joinedAt: row.project_snapshot?.joinedAt || null,
@@ -220,11 +228,17 @@ function buildPeriodSnapshot(row) {
 }
 
 function buildProjectSnapshot(row) {
-  const role = (row.project_role && String(row.project_role).trim().toLowerCase() !== "alumni")
-    ? row.project_role
-    : (row.graduation_position_label && String(row.graduation_position_label).trim().toLowerCase() !== "alumni")
-      ? row.graduation_position_label
-      : (row.activity_type === "Riset" || row.tipe === "Riset" ? "Anggota Riset" : "Peserta Magang");
+  const rmRole = typeof row.project_role === "string" ? row.project_role.trim() : "";
+  const gspRole = typeof row.graduation_position_label === "string" ? row.graduation_position_label.trim() : "";
+  const role = (rmRole && !isGenericOrAlumniRole(rmRole))
+    ? rmRole
+    : (gspRole && !isGenericOrAlumniRole(gspRole))
+      ? gspRole
+      : (rmRole && rmRole.toLowerCase() !== "alumni")
+        ? rmRole
+        : (gspRole && gspRole.toLowerCase() !== "alumni")
+          ? gspRole
+          : (row.activity_type === "Riset" || row.tipe === "Riset" ? "Anggota Riset" : "Peserta Magang");
   return {
     legacyProjectId: row.project_id,
     title: row.project_title,
@@ -262,10 +276,6 @@ async function loadEligibleContext(client, { studentId, periodId }) {
         ON gsp.student_id = ps.id
        AND gsp.project_id = rm.project_id
       WHERE ps.id = $1
-        AND (
-          NOT EXISTS (SELECT 1 FROM graduation_submission_projects WHERE student_id = ps.id)
-          OR gsp.project_id IS NOT NULL
-        )
       GROUP BY ps.id
     )
     SELECT s.id AS student_id, s.user_id, s.nim, s.status AS student_status,
@@ -304,20 +314,15 @@ async function loadEligibleContext(client, { studentId, periodId }) {
 async function loadEligibleProjects(client, studentId) {
   const result = await client.query(
     `
-    WITH has_graduation_projects AS (
-      SELECT EXISTS (
-        SELECT 1
-        FROM graduation_submission_projects
-        WHERE student_id = $1
-      ) AS has_projects
-    )
-    SELECT DISTINCT rm.project_id, gsp.project_title AS graduation_project_title,
+    SELECT DISTINCT rm.id AS membership_id, rm.project_id, gsp.project_title AS graduation_project_title,
            rp.title AS project_title, rp.short_title AS project_short_title,
            rp.period_text AS project_period_text, rp.status AS project_status,
            rm.status AS membership_status,
            COALESCE(
-             CASE WHEN BTRIM(COALESCE(gsp.position_label, '')) = '' OR LOWER(BTRIM(gsp.position_label)) = 'alumni' THEN NULL ELSE BTRIM(gsp.position_label) END,
-             CASE WHEN BTRIM(COALESCE(rm.peran, '')) = '' OR LOWER(BTRIM(rm.peran)) = 'alumni' THEN NULL ELSE BTRIM(rm.peran) END,
+             CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm.peran) END,
+             CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(gsp.position_label) END,
+             CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm.peran) END,
+             CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(gsp.position_label) END,
              CASE WHEN s.tipe = 'Riset' THEN 'Anggota Riset' ELSE 'Peserta Magang' END
            ) AS project_role,
            gsp.position_label AS graduation_position_label,
@@ -331,10 +336,8 @@ async function loadEligibleProjects(client, studentId) {
     LEFT JOIN graduation_submission_projects gsp
       ON gsp.student_id = s.id
      AND gsp.project_id = rm.project_id
-    CROSS JOIN has_graduation_projects hgp
     WHERE s.id = $1
-      AND (hgp.has_projects = FALSE OR gsp.project_id IS NOT NULL)
-    ORDER BY project_short_title, project_title, rm.project_id
+    ORDER BY rm.id ASC, project_short_title, project_title, rm.project_id
     `,
     [studentId]
   );
@@ -840,10 +843,6 @@ async function listEligible(rawQuery) {
          AND gsp.project_id = rm.project_id
         WHERE rm.user_id = s.user_id
           AND rm.member_type = 'Mahasiswa'
-          AND (
-            NOT EXISTS (SELECT 1 FROM graduation_submission_projects WHERE student_id = s.id)
-            OR gsp.project_id IS NOT NULL
-          )
       ) pp ON TRUE
       WHERE ${predicates.join(" AND ")}
         AND (sp.id IS NOT NULL OR pp.project_start_date IS NOT NULL OR pp.project_end_date IS NOT NULL OR s.bergabung IS NOT NULL OR gs.graduation_completed_at IS NOT NULL)
@@ -866,24 +865,22 @@ async function listEligible(rawQuery) {
         'title', rp.title,
         'shortTitle', rp.short_title,
         'role', COALESCE(
-          CASE WHEN BTRIM(COALESCE(gsp.position_label, '')) = '' OR LOWER(BTRIM(gsp.position_label)) = 'alumni' THEN NULL ELSE BTRIM(gsp.position_label) END,
-          CASE WHEN BTRIM(COALESCE(rm.peran, '')) = '' OR LOWER(BTRIM(rm.peran)) = 'alumni' THEN NULL ELSE BTRIM(rm.peran) END,
+          CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm.peran) END,
+          CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(gsp.position_label) END,
+          CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm.peran) END,
+          CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(gsp.position_label) END,
           CASE WHEN ps.tipe = 'Riset' THEN 'Anggota Riset' ELSE 'Peserta Magang' END
         ),
         'status', rp.status,
         'membershipStatus', rm.status,
         'joinedAt', TO_CHAR(rm.bergabung, 'YYYY-MM-DD'),
         'completedAt', TO_CHAR(rm.selesai, 'YYYY-MM-DD')
-      ) ORDER BY COALESCE(rp.short_title, rp.title), rp.id) AS items
+      ) ORDER BY rm.id ASC, COALESCE(rp.short_title, rp.title), rp.id) AS items
       FROM students ps
       JOIN research_memberships rm ON rm.user_id = ps.user_id AND rm.member_type = 'Mahasiswa'
       JOIN research_projects rp ON rp.id = rm.project_id
       LEFT JOIN graduation_submission_projects gsp ON gsp.student_id = ps.id AND gsp.project_id = rm.project_id
       WHERE ps.id = f.student_id
-        AND (
-          NOT EXISTS (SELECT 1 FROM graduation_submission_projects WHERE student_id = ps.id)
-          OR gsp.project_id IS NOT NULL
-        )
     ) projects ON TRUE
     ORDER BY f.student_name ASC, f.student_id ASC, f.period_start_date DESC
     `,
@@ -1480,8 +1477,12 @@ async function queryCaseProjectsWithResolvedRole(caseId) {
            COALESCE(
              (
                SELECT COALESCE(
-                 CASE WHEN BTRIM(COALESCE(gsp.position_label, '')) = '' OR LOWER(BTRIM(gsp.position_label)) = 'alumni' THEN NULL ELSE BTRIM(gsp.position_label) END,
-                 CASE WHEN BTRIM(COALESCE(rm.peran, '')) = '' OR LOWER(BTRIM(rm.peran)) = 'alumni' THEN NULL ELSE BTRIM(rm.peran) END,
+                 CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm.peran) END,
+                 CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(gsp.position_label) END,
+                 CASE WHEN LOWER(BTRIM(COALESCE(rm_primary.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm_primary.peran) END,
+                 CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm.peran) END,
+                 CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(gsp.position_label) END,
+                 CASE WHEN LOWER(BTRIM(COALESCE(rm_primary.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm_primary.peran) END,
                  CASE WHEN c.activity_type = 'Riset' THEN 'Anggota Riset' ELSE 'Peserta Magang' END
                )
                FROM dc_final_activity_cases c
@@ -1493,11 +1494,53 @@ async function queryCaseProjectsWithResolvedRole(caseId) {
                  ON rm.user_id = s.user_id
                 AND rm.project_id = cp.legacy_project_id
                 AND rm.member_type = 'Mahasiswa'
+               LEFT JOIN LATERAL (
+                 SELECT rm_f.peran
+                 FROM research_memberships rm_f
+                 WHERE rm_f.user_id = s.user_id
+                   AND rm_f.member_type = 'Mahasiswa'
+                 ORDER BY rm_f.id ASC
+                 LIMIT 1
+               ) rm_primary ON TRUE
                WHERE c.id = cp.final_activity_case_id
                LIMIT 1
              ),
              'Peserta Magang'
            ) AS resolved_project_role,
+           (
+             SELECT COALESCE(rp.title, rp_primary.title)
+             FROM dc_final_activity_cases c
+             LEFT JOIN students s ON s.id = c.legacy_student_id
+             LEFT JOIN research_projects rp ON rp.id = cp.legacy_project_id
+             LEFT JOIN LATERAL (
+               SELECT rp_f.title
+               FROM research_memberships rm_f
+               JOIN research_projects rp_f ON rp_f.id = rm_f.project_id
+               WHERE rm_f.user_id = s.user_id
+                 AND rm_f.member_type = 'Mahasiswa'
+               ORDER BY rm_f.id ASC
+               LIMIT 1
+             ) rp_primary ON TRUE
+             WHERE c.id = cp.final_activity_case_id
+             LIMIT 1
+           ) AS resolved_project_title,
+           (
+             SELECT COALESCE(rp.short_title, rp_primary.short_title)
+             FROM dc_final_activity_cases c
+             LEFT JOIN students s ON s.id = c.legacy_student_id
+             LEFT JOIN research_projects rp ON rp.id = cp.legacy_project_id
+             LEFT JOIN LATERAL (
+               SELECT rp_f.short_title
+               FROM research_memberships rm_f
+               JOIN research_projects rp_f ON rp_f.id = rm_f.project_id
+               WHERE rm_f.user_id = s.user_id
+                 AND rm_f.member_type = 'Mahasiswa'
+               ORDER BY rm_f.id ASC
+               LIMIT 1
+             ) rp_primary ON TRUE
+             WHERE c.id = cp.final_activity_case_id
+             LIMIT 1
+           ) AS resolved_project_short_title,
            od.id AS certificate_document_id,
            od.title AS certificate_document_title,
            od.document_number AS certificate_document_number,
@@ -1520,7 +1563,11 @@ async function detailCase(id) {
   let projects = await queryCaseProjectsWithResolvedRole(caseId);
   const needsAlumniHeal = projects.rows.some((row) => {
     const snapshotRole = typeof row.project_snapshot?.role === "string" ? row.project_snapshot.role.trim() : "";
-    return (!snapshotRole || snapshotRole.toLowerCase() === "alumni") && row.resolved_project_role;
+    const resolvedRole = typeof row.resolved_project_role === "string" ? row.resolved_project_role.trim() : "";
+    return (
+      ((!snapshotRole || snapshotRole.toLowerCase() === "alumni") && Boolean(resolvedRole)) ||
+      (isGenericOrAlumniRole(snapshotRole) && Boolean(resolvedRole) && !isGenericOrAlumniRole(resolvedRole))
+    );
   });
   if (needsAlumniHeal) {
     const healed = await healCaseAlumniRoleByCaseId(caseId).catch(() => false);
@@ -1872,8 +1919,12 @@ async function updateFinalActivityDynamicData({ id, body, authUser, ip }) {
               COALESCE(
                 (
                   SELECT COALESCE(
-                    CASE WHEN BTRIM(COALESCE(gsp.position_label, '')) = '' OR LOWER(BTRIM(gsp.position_label)) = 'alumni' THEN NULL ELSE BTRIM(gsp.position_label) END,
-                    CASE WHEN BTRIM(COALESCE(rm.peran, '')) = '' OR LOWER(BTRIM(rm.peran)) = 'alumni' THEN NULL ELSE BTRIM(rm.peran) END
+                    CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm.peran) END,
+                    CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(gsp.position_label) END,
+                    CASE WHEN LOWER(BTRIM(COALESCE(rm_primary.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm_primary.peran) END,
+                    CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm.peran) END,
+                    CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(gsp.position_label) END,
+                    CASE WHEN LOWER(BTRIM(COALESCE(rm_primary.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm_primary.peran) END
                   )
                   FROM students s
                   LEFT JOIN graduation_submission_projects gsp
@@ -1883,6 +1934,14 @@ async function updateFinalActivityDynamicData({ id, body, authUser, ip }) {
                     ON rm.user_id = s.user_id
                    AND rm.project_id = cp.legacy_project_id
                    AND rm.member_type = 'Mahasiswa'
+                  LEFT JOIN LATERAL (
+                    SELECT rm_f.peran
+                    FROM research_memberships rm_f
+                    WHERE rm_f.user_id = s.user_id
+                      AND rm_f.member_type = 'Mahasiswa'
+                    ORDER BY rm_f.id ASC
+                    LIMIT 1
+                  ) rm_primary ON TRUE
                   WHERE s.id = $2
                   LIMIT 1
                 ),
@@ -1897,8 +1956,12 @@ async function updateFinalActivityDynamicData({ id, body, authUser, ip }) {
     if (!projectResult.rowCount) throw httpError(409, "Case belum memiliki project.");
     let projectRows = projectResult.rows.map((row) => {
       const snapshotRole = typeof row.project_snapshot?.role === "string" ? row.project_snapshot.role.trim() : "";
-      if ((!snapshotRole || snapshotRole.toLowerCase() === "alumni") && row.resolved_project_role) {
-        return { ...row, project_snapshot: { ...(row.project_snapshot || {}), role: row.resolved_project_role } };
+      const resolvedRole = typeof row.resolved_project_role === "string" ? row.resolved_project_role.trim() : "";
+      if (
+        ((!snapshotRole || snapshotRole.toLowerCase() === "alumni") && resolvedRole) ||
+        (isGenericOrAlumniRole(snapshotRole) && resolvedRole && !isGenericOrAlumniRole(resolvedRole))
+      ) {
+        return { ...row, project_snapshot: { ...(row.project_snapshot || {}), role: resolvedRole } };
       }
       return row;
     });
@@ -1996,7 +2059,7 @@ async function updateFinalActivityDynamicData({ id, body, authUser, ip }) {
   }
 }
 
-async function healCaseAlumniRoleByCaseId(caseId) {
+async function healCaseAlumniRoleByCaseId(caseId, { forceSyncFromStudent = false } = {}) {
   const client = await pool.connect();
   const generatedFiles = [];
   try {
@@ -2012,8 +2075,12 @@ async function healCaseAlumniRoleByCaseId(caseId) {
               COALESCE(
                 (
                   SELECT COALESCE(
-                    CASE WHEN BTRIM(COALESCE(gsp.position_label, '')) = '' OR LOWER(BTRIM(gsp.position_label)) = 'alumni' THEN NULL ELSE BTRIM(gsp.position_label) END,
-                    CASE WHEN BTRIM(COALESCE(rm.peran, '')) = '' OR LOWER(BTRIM(rm.peran)) = 'alumni' THEN NULL ELSE BTRIM(rm.peran) END
+                    CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm.peran) END,
+                    CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(gsp.position_label) END,
+                    CASE WHEN LOWER(BTRIM(COALESCE(rm_primary.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm_primary.peran) END,
+                    CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm.peran) END,
+                    CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(gsp.position_label) END,
+                    CASE WHEN LOWER(BTRIM(COALESCE(rm_primary.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm_primary.peran) END
                   )
                   FROM students s
                   LEFT JOIN graduation_submission_projects gsp
@@ -2023,11 +2090,51 @@ async function healCaseAlumniRoleByCaseId(caseId) {
                     ON rm.user_id = s.user_id
                    AND rm.project_id = cp.legacy_project_id
                    AND rm.member_type = 'Mahasiswa'
+                  LEFT JOIN LATERAL (
+                    SELECT rm_f.peran
+                    FROM research_memberships rm_f
+                    WHERE rm_f.user_id = s.user_id
+                      AND rm_f.member_type = 'Mahasiswa'
+                    ORDER BY rm_f.id ASC
+                    LIMIT 1
+                  ) rm_primary ON TRUE
                   WHERE s.id = $2
                   LIMIT 1
                 ),
                 CASE WHEN $3 = 'Riset' THEN 'Anggota Riset' ELSE 'Peserta Magang' END
-              ) AS resolved_project_role
+              ) AS resolved_project_role,
+              (
+                SELECT COALESCE(rp.title, rp_primary.title)
+                FROM students s
+                LEFT JOIN research_projects rp ON rp.id = cp.legacy_project_id
+                LEFT JOIN LATERAL (
+                  SELECT rp_f.title
+                  FROM research_memberships rm_f
+                  JOIN research_projects rp_f ON rp_f.id = rm_f.project_id
+                  WHERE rm_f.user_id = s.user_id
+                    AND rm_f.member_type = 'Mahasiswa'
+                  ORDER BY rm_f.id ASC
+                  LIMIT 1
+                ) rp_primary ON TRUE
+                WHERE s.id = $2
+                LIMIT 1
+              ) AS resolved_project_title,
+              (
+                SELECT COALESCE(rp.short_title, rp_primary.short_title)
+                FROM students s
+                LEFT JOIN research_projects rp ON rp.id = cp.legacy_project_id
+                LEFT JOIN LATERAL (
+                  SELECT rp_f.short_title
+                  FROM research_memberships rm_f
+                  JOIN research_projects rp_f ON rp_f.id = rm_f.project_id
+                  WHERE rm_f.user_id = s.user_id
+                    AND rm_f.member_type = 'Mahasiswa'
+                  ORDER BY rm_f.id ASC
+                  LIMIT 1
+                ) rp_primary ON TRUE
+                WHERE s.id = $2
+                LIMIT 1
+              ) AS resolved_project_short_title
        FROM dc_final_activity_case_projects cp
        WHERE cp.final_activity_case_id = $1
        ORDER BY cp.display_order, cp.id
@@ -2043,8 +2150,26 @@ async function healCaseAlumniRoleByCaseId(caseId) {
     const projectRows = [];
     for (const row of projectResult.rows) {
       const snapshotRole = typeof row.project_snapshot?.role === "string" ? row.project_snapshot.role.trim() : "";
-      if ((!snapshotRole || snapshotRole.toLowerCase() === "alumni") && row.resolved_project_role) {
-        const nextProjectSnapshot = { ...(row.project_snapshot || {}), role: row.resolved_project_role };
+      const resolvedRole = typeof row.resolved_project_role === "string" ? row.resolved_project_role.trim() : "";
+      const snapshotTitle = typeof row.project_snapshot?.title === "string" ? row.project_snapshot.title.trim() : "";
+      const resolvedTitle = typeof row.resolved_project_title === "string" ? row.resolved_project_title.trim() : "";
+      const resolvedShortTitle = typeof row.resolved_project_short_title === "string" ? row.resolved_project_short_title.trim() : "";
+      const shouldUpdateRole = Boolean(resolvedRole) && (
+        !snapshotRole ||
+        snapshotRole.toLowerCase() === "alumni" ||
+        (isGenericOrAlumniRole(snapshotRole) && !isGenericOrAlumniRole(resolvedRole)) ||
+        (forceSyncFromStudent && snapshotRole !== resolvedRole)
+      );
+      const shouldUpdateTitle = Boolean(resolvedTitle) && (
+        !snapshotTitle ||
+        (forceSyncFromStudent && snapshotTitle !== resolvedTitle)
+      );
+      if (shouldUpdateRole || shouldUpdateTitle) {
+        const nextProjectSnapshot = {
+          ...(row.project_snapshot || {}),
+          ...(shouldUpdateRole ? { role: resolvedRole } : {}),
+          ...(shouldUpdateTitle ? { title: resolvedTitle, shortTitle: resolvedShortTitle || row.project_snapshot?.shortTitle || null } : {})
+        };
         await client.query(
           `UPDATE dc_final_activity_case_projects
            SET project_snapshot=$2::jsonb, updated_at=NOW()
@@ -2054,9 +2179,10 @@ async function healCaseAlumniRoleByCaseId(caseId) {
         if (row.certificate_document_id) {
           await client.query(
             `UPDATE dc_official_document_students
-             SET participant_role=$2
+             SET participant_role=$2,
+                 project_name_snapshot=COALESCE($3, project_name_snapshot)
              WHERE document_id=$1`,
-            [row.certificate_document_id, row.resolved_project_role]
+            [row.certificate_document_id, nextProjectSnapshot.role || resolvedRole, nextProjectSnapshot.title || null]
           );
         }
         updatedAny = true;
@@ -2074,9 +2200,16 @@ async function healCaseAlumniRoleByCaseId(caseId) {
     if (caseRow.completion_document_id && projectRows[0]?.project_snapshot?.role) {
       await client.query(
         `UPDATE dc_official_document_students
-         SET participant_role=$2
-         WHERE document_id=$1 AND LOWER(BTRIM(COALESCE(participant_role, ''))) IN ('', 'alumni')`,
-        [caseRow.completion_document_id, projectRows[0].project_snapshot.role]
+         SET participant_role=$2,
+             project_name_snapshot=COALESCE($3, project_name_snapshot)
+         WHERE document_id=$1
+           AND ($4 = TRUE OR LOWER(BTRIM(COALESCE(participant_role, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa'))`,
+        [
+          caseRow.completion_document_id,
+          projectRows[0].project_snapshot.role,
+          projectRows[0].project_snapshot.title || null,
+          Boolean(forceSyncFromStudent)
+        ]
       );
     }
 
@@ -2106,7 +2239,7 @@ async function healCaseAlumniRoleByDocumentId(documentId) {
     `SELECT final_activity_case_id AS case_id
      FROM dc_final_activity_case_projects
      WHERE certificate_document_id = $1
-       AND LOWER(BTRIM(COALESCE(project_snapshot->>'role', ''))) IN ('', 'alumni')
+       AND LOWER(BTRIM(COALESCE(project_snapshot->>'role', ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa')
      UNION
      SELECT c.id AS case_id
      FROM dc_final_activity_cases c
@@ -2115,13 +2248,27 @@ async function healCaseAlumniRoleByDocumentId(documentId) {
          SELECT 1
          FROM dc_final_activity_case_projects cp
          WHERE cp.final_activity_case_id = c.id
-           AND LOWER(BTRIM(COALESCE(cp.project_snapshot->>'role', ''))) IN ('', 'alumni')
+           AND LOWER(BTRIM(COALESCE(cp.project_snapshot->>'role', ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa')
        )
      LIMIT 1`,
     [documentId]
   );
   if (!check.rowCount) return false;
   return healCaseAlumniRoleByCaseId(check.rows[0].case_id);
+}
+
+async function healStudentFinalActivityCases(studentId) {
+  if (!studentId) return false;
+  const casesResult = await pool.query(
+    `SELECT id FROM dc_final_activity_cases WHERE legacy_student_id = $1`,
+    [studentId]
+  );
+  let healedAny = false;
+  for (const row of casesResult.rows) {
+    const healed = await healCaseAlumniRoleByCaseId(row.id, { forceSyncFromStudent: true }).catch(() => false);
+    if (healed) healedAny = true;
+  }
+  return healedAny;
 }
 
 async function markIssuedForPublishedDocument(client, { documentId, authUser, ip }) {
@@ -2172,5 +2319,6 @@ module.exports = {
   cleanupCreatedFinalActivityCases,
   markIssuedForPublishedDocument,
   healCaseAlumniRoleByCaseId,
-  healCaseAlumniRoleByDocumentId
+  healCaseAlumniRoleByDocumentId,
+  healStudentFinalActivityCases
 };

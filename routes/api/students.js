@@ -28,6 +28,9 @@ const {
 const {
   ensureGraduationSubmissionsTables
 } = require("../../utils/graduationSubmissions");
+const {
+  healStudentFinalActivityCases
+} = require("../../utils/documentCenterFinalActivity");
 
 const router = express.Router();
 let ensureStudentColumnsPromise = null;
@@ -218,6 +221,12 @@ function normalizeResearchMembershipInputs(input, fallbackBergabung) {
 
     if (!selection) continue;
 
+    const rawPeran = isObject
+      ? item.peran ?? item.role ?? item.position ?? item.positionLabel ?? item.position_label
+      : null;
+    const trimmedPeran = rawPeran != null ? String(rawPeran).trim() : "";
+    const peran = trimmedPeran && trimmedPeran.toLowerCase() !== "alumni" ? trimmedPeran : null;
+
     const joinedAt = isObject
       ? normalizeOptionalDateField(item.bergabung ?? item.joinedAt ?? item.startDate ?? item.mulai, "Tanggal bergabung riset")
       : null;
@@ -237,12 +246,13 @@ function normalizeResearchMembershipInputs(input, fallbackBergabung) {
       if (existing) {
         existing.bergabung = joinedAt || existing.bergabung;
         existing.selesai = finishedAt;
+        existing.peran = peran || existing.peran;
       }
       continue;
     }
 
     seen.add(selection);
-    normalized.push({ selection, bergabung: joinedAt, selesai: finishedAt });
+    normalized.push({ selection, bergabung: joinedAt, selesai: finishedAt, peran });
   }
 
   return normalized;
@@ -291,7 +301,8 @@ async function resolveResearchMemberships(input, fallbackBergabung) {
     resolved.push({
       projectId,
       bergabung: item.bergabung || fallbackBergabung || null,
-      selesai: item.selesai || null
+      selesai: item.selesai || null,
+      peran: item.peran || null
     });
   }
 
@@ -302,7 +313,7 @@ async function resolveResearchMemberships(input, fallbackBergabung) {
   return resolved;
 }
 
-async function syncStudentResearchMemberships({ userId, researchMemberships, executor = query }) {
+async function syncStudentResearchMemberships({ userId, studentStatus = null, researchMemberships, executor = query }) {
   if (!userId) return;
 
   const memberships = Array.isArray(researchMemberships) ? researchMemberships : [];
@@ -338,13 +349,18 @@ async function syncStudentResearchMemberships({ userId, researchMemberships, exe
     SELECT selected.project_id,
            $1,
            'Mahasiswa',
-           NULL,
-           CASE WHEN selected.selesai IS NOT NULL AND selected.selesai < CURRENT_DATE THEN 'Nonaktif' ELSE 'Aktif' END,
+           NULLIF(BTRIM(COALESCE(selected.peran, '')), ''),
+           CASE
+             WHEN $6::text = 'Alumni' THEN 'Nonaktif'
+             WHEN selected.selesai IS NOT NULL AND selected.selesai < CURRENT_DATE THEN 'Nonaktif'
+             ELSE 'Aktif'
+           END,
            selected.bergabung,
            selected.selesai
-    FROM UNNEST($2::text[], $3::date[], $4::date[]) AS selected(project_id, bergabung, selesai)
+    FROM UNNEST($2::text[], $3::date[], $4::date[], $5::text[]) AS selected(project_id, bergabung, selesai, peran)
     ON CONFLICT (project_id, user_id)
     DO UPDATE SET member_type = EXCLUDED.member_type,
+                  peran = COALESCE(NULLIF(BTRIM(COALESCE(EXCLUDED.peran, '')), ''), research_memberships.peran),
                   status = EXCLUDED.status,
                   bergabung = COALESCE(EXCLUDED.bergabung, research_memberships.bergabung),
                   selesai = EXCLUDED.selesai
@@ -353,9 +369,29 @@ async function syncStudentResearchMemberships({ userId, researchMemberships, exe
       userId,
       projectIds,
       memberships.map((item) => item.bergabung || null),
-      memberships.map((item) => item.selesai || null)
+      memberships.map((item) => item.selesai || null),
+      memberships.map((item) => item.peran || null),
+      studentStatus || null
     ]
   );
+
+  await runQuery(
+    executor,
+    `
+    UPDATE graduation_submission_projects gsp
+    SET position_label = rm.peran,
+        updated_at = NOW()
+    FROM students s, research_memberships rm
+    WHERE s.user_id = $1
+      AND gsp.student_id = s.id
+      AND rm.user_id = $1
+      AND rm.project_id = gsp.project_id
+      AND rm.member_type = 'Mahasiswa'
+      AND BTRIM(COALESCE(rm.peran, '')) <> ''
+      AND LOWER(BTRIM(rm.peran)) <> 'alumni'
+    `,
+    [userId]
+  ).catch(() => {});
 }
 
 function getRequestBaseUrl(req) {
@@ -506,6 +542,7 @@ router.get(
             'projectId', rp.id,
             'title', rp.title,
             'short_title', COALESCE(rp.short_title, rp.title),
+            'peran', CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) = 'alumni' THEN NULL ELSE NULLIF(BTRIM(COALESCE(rm.peran, '')), '') END,
             'bergabung', TO_CHAR(rm.bergabung, 'YYYY-MM-DD'),
             'selesai', TO_CHAR(rm.selesai, 'YYYY-MM-DD'),
             'status', rm.status
@@ -514,7 +551,7 @@ router.get(
         ) AS research_memberships
       FROM students s
       JOIN users u ON u.id = s.user_id
-      LEFT JOIN research_memberships rm ON rm.user_id = u.id AND rm.member_type = 'Mahasiswa' AND rm.status = 'Aktif' AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE)
+      LEFT JOIN research_memberships rm ON rm.user_id = u.id AND rm.member_type = 'Mahasiswa'
       LEFT JOIN research_projects rp ON rp.id = rm.project_id
       LEFT JOIN leave_requests lr ON lr.student_id = s.id AND lr.jenis_pengajuan = 'wfh' AND lr.status = 'Disetujui' AND lr.periode_start BETWEEN ${weekStartPlaceholder}::date AND ${weekEndPlaceholder}::date
       ${whereClause}
@@ -601,6 +638,7 @@ router.get(
             'projectId', rp.id,
             'title', rp.title,
             'short_title', COALESCE(rp.short_title, rp.title),
+            'peran', CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) = 'alumni' THEN NULL ELSE NULLIF(BTRIM(COALESCE(rm.peran, '')), '') END,
             'bergabung', TO_CHAR(rm.bergabung, 'YYYY-MM-DD'),
             'selesai', TO_CHAR(rm.selesai, 'YYYY-MM-DD'),
             'status', rm.status
@@ -609,7 +647,7 @@ router.get(
         ) AS research_memberships
       FROM students s
       JOIN users u ON u.id = s.user_id
-      LEFT JOIN research_memberships rm ON rm.user_id = u.id AND rm.member_type = 'Mahasiswa' AND rm.status = 'Aktif' AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE)
+      LEFT JOIN research_memberships rm ON rm.user_id = u.id AND rm.member_type = 'Mahasiswa'
       LEFT JOIN research_projects rp ON rp.id = rm.project_id
       LEFT JOIN leave_requests lr ON lr.student_id = s.id AND lr.jenis_pengajuan = 'wfh' AND lr.status = 'Disetujui' AND lr.periode_start BETWEEN $2::date AND $3::date
       WHERE s.id = $1
@@ -774,6 +812,7 @@ router.post(
 
       await syncStudentResearchMemberships({
         userId,
+        studentStatus: status,
         researchMemberships: resolvedResearchMemberships,
         executor: client
       });
@@ -1000,6 +1039,7 @@ router.put(
       if (hasResearchSelections) {
         await syncStudentResearchMemberships({
           userId,
+          studentStatus: status || previousStatus,
           researchMemberships: resolvedResearchMemberships,
           executor: client
         });
@@ -1103,6 +1143,10 @@ router.put(
       }
 
       await client.query("COMMIT");
+
+      if (hasResearchSelections) {
+        await healStudentFinalActivityCases(studentId).catch(() => null);
+      }
 
       if (isGraduating) {
         createNotification({

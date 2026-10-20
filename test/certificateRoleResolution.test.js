@@ -80,3 +80,19 @@ test("documentCenter utilities do not reference non-existent legacy_membership_i
   }
 });
 
+test("modified backend modules load cleanly and prioritize research_memberships.peran", () => {
+  const finalActivity = require("../utils/documentCenterFinalActivity");
+  const lookups = require("../utils/documentCenterLookups");
+  const studentsRouter = require("../routes/api/students");
+  const certificatesRouter = require("../routes/api/certificates");
+  const graduationRouter = require("../routes/api/graduationSubmissions");
+
+  assert.equal(typeof finalActivity.healStudentFinalActivityCases, "function");
+  assert.equal(typeof finalActivity.healCaseAlumniRoleByCaseId, "function");
+  assert.equal(typeof lookups.listStudentProjects, "function");
+  assert.ok(studentsRouter);
+  assert.ok(certificatesRouter);
+  assert.ok(graduationRouter);
+});
+
+

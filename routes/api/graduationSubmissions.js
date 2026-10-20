@@ -192,10 +192,21 @@ async function getSavedSubmission(studentId) {
 
   const projectsResult = await query(
     `
-    SELECT *
-    FROM graduation_submission_projects
-    WHERE submission_id = $1
-    ORDER BY project_title ASC, project_id ASC
+    SELECT gsp.*,
+           COALESCE(
+             CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm.peran) END,
+             CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(gsp.position_label) END,
+             CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm.peran) END,
+             gsp.position_label
+           ) AS position_label
+    FROM graduation_submission_projects gsp
+    LEFT JOIN students s ON s.id = gsp.student_id
+    LEFT JOIN research_memberships rm
+      ON rm.user_id = s.user_id
+     AND rm.project_id = gsp.project_id
+     AND rm.member_type = 'Mahasiswa'
+    WHERE gsp.submission_id = $1
+    ORDER BY rm.id ASC NULLS LAST, gsp.project_title ASC, gsp.project_id ASC
     `,
     [submission.id]
   );
@@ -489,10 +500,21 @@ async function getSubmissionDetailById(submissionId) {
 
   const projectsResult = await query(
     `
-    SELECT *
-    FROM graduation_submission_projects
-    WHERE submission_id = $1
-    ORDER BY project_title ASC, project_id ASC
+    SELECT gsp.*,
+           COALESCE(
+             CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm.peran) END,
+             CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(gsp.position_label) END,
+             CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm.peran) END,
+             gsp.position_label
+           ) AS position_label
+    FROM graduation_submission_projects gsp
+    LEFT JOIN students s ON s.id = gsp.student_id
+    LEFT JOIN research_memberships rm
+      ON rm.user_id = s.user_id
+     AND rm.project_id = gsp.project_id
+     AND rm.member_type = 'Mahasiswa'
+    WHERE gsp.submission_id = $1
+    ORDER BY rm.id ASC NULLS LAST, gsp.project_title ASC, gsp.project_id ASC
     `,
     [submissionId]
   );

@@ -650,15 +650,26 @@ async function generateCertificateDraft({ id, authUser, ip }) {
                LIMIT 1
              ) AS graduation_position_label,
              (
-               SELECT BTRIM(rm.peran)
+               SELECT COALESCE(
+                 CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm.peran) END,
+                 CASE WHEN LOWER(BTRIM(COALESCE(rm_primary.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm_primary.peran) END,
+                 CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm.peran) END,
+                 CASE WHEN LOWER(BTRIM(COALESCE(rm_primary.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm_primary.peran) END
+               )
                FROM students s
-               JOIN research_memberships rm
+               LEFT JOIN research_memberships rm
                  ON rm.user_id = s.user_id
                 AND rm.project_id = cp.legacy_project_id
                 AND rm.member_type = 'Mahasiswa'
+               LEFT JOIN LATERAL (
+                 SELECT rm_f.peran
+                 FROM research_memberships rm_f
+                 WHERE rm_f.user_id = s.user_id
+                   AND rm_f.member_type = 'Mahasiswa'
+                 ORDER BY rm_f.id ASC
+                 LIMIT 1
+               ) rm_primary ON TRUE
                WHERE s.id = c.legacy_student_id
-                 AND BTRIM(COALESCE(rm.peran, '')) <> ''
-                 AND LOWER(BTRIM(rm.peran)) <> 'alumni'
                LIMIT 1
              ) AS rm_peran
       FROM dc_final_activity_case_projects cp
@@ -673,13 +684,27 @@ async function generateCertificateDraft({ id, authUser, ip }) {
     if (row.outcome !== "completed" || !["Magang", "Riset"].includes(row.activity_type) || row.certificate_required !== true || row.certificate_status !== "pending" || row.certificate_document_id || row.case_status === "revoked") {
       throw httpError(409, "Sertifikat tidak dapat dibuatkan draft generator.");
     }
-    const resolvedRole = (row.project_snapshot?.role && String(row.project_snapshot.role).trim().toLowerCase() !== "alumni")
-      ? row.project_snapshot.role
-      : (row.graduation_position_label && String(row.graduation_position_label).trim().toLowerCase() !== "alumni")
-        ? row.graduation_position_label
-        : (row.rm_peran && String(row.rm_peran).trim().toLowerCase() !== "alumni")
-          ? row.rm_peran
-          : (row.activity_type === "Riset" ? "Anggota Riset" : "Peserta Magang");
+    const isGenericRole = (val) => {
+      const n = typeof val === "string" ? val.trim().toLowerCase() : "";
+      return !n || ["alumni", "anggota", "anggota riset", "peserta magang", "mahasiswa"].includes(n);
+    };
+    const isNonAlumniRole = (val) => {
+      const n = typeof val === "string" ? val.trim().toLowerCase() : "";
+      return Boolean(n) && n !== "alumni";
+    };
+    const resolvedRole = !isGenericRole(row.project_snapshot?.role)
+      ? String(row.project_snapshot.role).trim()
+      : !isGenericRole(row.rm_peran)
+        ? String(row.rm_peran).trim()
+        : !isGenericRole(row.graduation_position_label)
+          ? String(row.graduation_position_label).trim()
+          : isNonAlumniRole(row.project_snapshot?.role)
+            ? String(row.project_snapshot.role).trim()
+            : isNonAlumniRole(row.rm_peran)
+              ? String(row.rm_peran).trim()
+              : isNonAlumniRole(row.graduation_position_label)
+                ? String(row.graduation_position_label).trim()
+                : (row.activity_type === "Riset" ? "Anggota Riset" : "Peserta Magang");
     if (row.project_snapshot?.role !== resolvedRole) {
       row.project_snapshot = { ...(row.project_snapshot || {}), role: resolvedRole };
       await client.query(

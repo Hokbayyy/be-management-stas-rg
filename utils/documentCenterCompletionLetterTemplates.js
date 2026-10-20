@@ -588,8 +588,12 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
               COALESCE(
                 (
                   SELECT COALESCE(
-                    CASE WHEN BTRIM(COALESCE(gsp.position_label, '')) = '' OR LOWER(BTRIM(gsp.position_label)) = 'alumni' THEN NULL ELSE BTRIM(gsp.position_label) END,
-                    CASE WHEN BTRIM(COALESCE(rm.peran, '')) = '' OR LOWER(BTRIM(rm.peran)) = 'alumni' THEN NULL ELSE BTRIM(rm.peran) END
+                    CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm.peran) END,
+                    CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(gsp.position_label) END,
+                    CASE WHEN LOWER(BTRIM(COALESCE(rm_primary.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm_primary.peran) END,
+                    CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm.peran) END,
+                    CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(gsp.position_label) END,
+                    CASE WHEN LOWER(BTRIM(COALESCE(rm_primary.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm_primary.peran) END
                   )
                   FROM students s
                   LEFT JOIN graduation_submission_projects gsp
@@ -599,6 +603,14 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
                     ON rm.user_id = s.user_id
                    AND rm.project_id = cp.legacy_project_id
                    AND rm.member_type = 'Mahasiswa'
+                  LEFT JOIN LATERAL (
+                    SELECT rm_f.peran
+                    FROM research_memberships rm_f
+                    WHERE rm_f.user_id = s.user_id
+                      AND rm_f.member_type = 'Mahasiswa'
+                    ORDER BY rm_f.id ASC
+                    LIMIT 1
+                  ) rm_primary ON TRUE
                   WHERE s.id = $2
                   LIMIT 1
                 ),
@@ -611,11 +623,19 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
       [caseId, caseRow.legacy_student_id, caseRow.activity_type]
     );
     if (projectResult.rowCount < 1) throw httpError(409, "Surat hanya dapat dibuat untuk case yang memiliki project.");
+    const isGenericRole = (val) => {
+      const n = typeof val === "string" ? val.trim().toLowerCase() : "";
+      return !n || ["alumni", "anggota", "anggota riset", "peserta magang", "mahasiswa"].includes(n);
+    };
     const projectRows = [];
     for (const row of projectResult.rows) {
       const snapshotRole = typeof row.project_snapshot?.role === "string" ? row.project_snapshot.role.trim() : "";
-      if ((!snapshotRole || snapshotRole.toLowerCase() === "alumni") && row.resolved_project_role) {
-        const nextSnapshot = { ...(row.project_snapshot || {}), role: row.resolved_project_role };
+      const resolvedRole = typeof row.resolved_project_role === "string" ? row.resolved_project_role.trim() : "";
+      if (
+        resolvedRole &&
+        (!snapshotRole || snapshotRole.toLowerCase() === "alumni" || (isGenericRole(snapshotRole) && !isGenericRole(resolvedRole)))
+      ) {
+        const nextSnapshot = { ...(row.project_snapshot || {}), role: resolvedRole };
         await client.query(
           "UPDATE dc_final_activity_case_projects SET project_snapshot = $2::jsonb, updated_at = NOW() WHERE id = $1",
           [row.id, JSON.stringify(nextSnapshot)]

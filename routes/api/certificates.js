@@ -162,16 +162,24 @@ router.get(
         rp.id AS project_id,
         COALESCE(rp.short_title, rp.title) AS project_name,
         COALESCE(
+          CASE WHEN LOWER(BTRIM(COALESCE(rm_mahasiswa.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm_mahasiswa.peran) END,
           (
             SELECT BTRIM(gsp.position_label)
             FROM graduation_submission_projects gsp
             WHERE gsp.student_id = s.id
               AND gsp.project_id = rp.id
-              AND BTRIM(COALESCE(gsp.position_label, '')) <> ''
-              AND LOWER(BTRIM(gsp.position_label)) <> 'alumni'
+              AND LOWER(BTRIM(COALESCE(gsp.position_label, ''))) NOT IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa')
             LIMIT 1
           ),
-          CASE WHEN BTRIM(COALESCE(rm_mahasiswa.peran, '')) = '' OR LOWER(BTRIM(rm_mahasiswa.peran)) = 'alumni' THEN NULL ELSE BTRIM(rm_mahasiswa.peran) END,
+          CASE WHEN LOWER(BTRIM(COALESCE(rm_mahasiswa.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm_mahasiswa.peran) END,
+          (
+            SELECT BTRIM(gsp.position_label)
+            FROM graduation_submission_projects gsp
+            WHERE gsp.student_id = s.id
+              AND gsp.project_id = rp.id
+              AND LOWER(BTRIM(COALESCE(gsp.position_label, ''))) NOT IN ('', 'alumni')
+            LIMIT 1
+          ),
           CASE WHEN s.tipe = 'Riset' THEN 'Anggota Riset' ELSE 'Peserta Magang' END
         ) AS student_role,
         cr.requested_by,
