@@ -1576,7 +1576,7 @@ async function listCases(rawQuery) {
   if (casesToHeal.length > 0) {
     setImmediate(async () => {
       for (const caseId of casesToHeal) {
-        await healCaseAlumniRoleByCaseId(caseId).catch(() => {});
+        await healCaseAlumniRoleByCaseId(caseId, { forceSyncFromStudent: true }).catch(() => {});
       }
     });
   }
@@ -1685,10 +1685,12 @@ async function detailCase(id) {
   let projects = await queryCaseProjectsWithResolvedRole(caseId);
   const needsAlumniHeal = projects.rows.some((row) => {
     const snapshotRole = typeof row.project_snapshot?.role === "string" ? row.project_snapshot.role.trim() : "";
+    const snapshotTitle = typeof row.project_snapshot?.title === "string" ? row.project_snapshot.title.trim() : "";
+    const resolvedTitle = typeof row.resolved_project_title === "string" ? row.resolved_project_title.trim() : "";
     const dmRole = typeof row.datamahasiswa_peran === "string" ? row.datamahasiswa_peran.trim() : "";
     const dmDiv = typeof row.datamahasiswa_division === "string" ? row.datamahasiswa_division.trim() : "";
     const resolvedRole = typeof row.resolved_project_role === "string" ? row.resolved_project_role.trim() : "";
-    const projectTitle = row.project_snapshot?.title || row.resolved_project_title || "";
+    const projectTitle = resolvedTitle || snapshotTitle || "";
     const inferredRole = inferRoleFromProjectTitle(projectTitle, dmDiv);
 
     let targetRole = "";
@@ -1704,10 +1706,12 @@ async function detailCase(id) {
         ? inferredRole
         : candidate;
     }
-    return Boolean(targetRole) && snapshotRole !== targetRole;
+    const roleMismatch = Boolean(targetRole) && snapshotRole !== targetRole;
+    const titleMismatch = Boolean(resolvedTitle) && snapshotTitle !== resolvedTitle;
+    return roleMismatch || titleMismatch;
   });
   if (needsAlumniHeal) {
-    const healed = await healCaseAlumniRoleByCaseId(caseId).catch(() => false);
+    const healed = await healCaseAlumniRoleByCaseId(caseId, { forceSyncFromStudent: true }).catch(() => false);
     if (healed) {
       result = await pool.query(`${CASE_SELECT} WHERE c.id = $1 LIMIT 1`, [caseId]);
       projects = await queryCaseProjectsWithResolvedRole(caseId);
