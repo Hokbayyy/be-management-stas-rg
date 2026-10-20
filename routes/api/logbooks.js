@@ -195,6 +195,21 @@ router.get(
 
     const { whereClause, params } = buildWhereClause(filters);
 
+    const rawLimit = req.query.limit;
+    const rawOffset = req.query.offset;
+    const limit = rawLimit !== undefined ? Math.max(1, Math.min(1000, Number(rawLimit) || 50)) : null;
+    const offset = rawOffset !== undefined ? Math.max(0, Number(rawOffset) || 0) : null;
+
+    let paginationClause = "";
+    if (limit != null) {
+      params.push(limit);
+      paginationClause += ` LIMIT $${params.length}`;
+      if (offset != null) {
+        params.push(offset);
+        paginationClause += ` OFFSET $${params.length}`;
+      }
+    }
+
     const result = await query(
       `
       SELECT le.id, le.student_id, su.name AS student_name, su.initials AS student_initials, su.photo_url AS student_photo_url,
@@ -257,6 +272,7 @@ router.get(
       LEFT JOIN users vu ON vu.id = lv.user_id
       ${whereClause}
       ORDER BY le.date DESC, le.id DESC
+      ${paginationClause}
       `,
       params
     );

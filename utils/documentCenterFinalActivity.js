@@ -1469,10 +1469,13 @@ async function listCases(rawQuery) {
     `,
     params
   );
-  for (const row of result.rows) {
-    if (row.needs_role_heal) {
-      await healCaseAlumniRoleByCaseId(row.id).catch(() => {});
-    }
+  const casesToHeal = result.rows.filter((row) => row.needs_role_heal).map((row) => row.id);
+  if (casesToHeal.length > 0) {
+    setImmediate(async () => {
+      for (const caseId of casesToHeal) {
+        await healCaseAlumniRoleByCaseId(caseId).catch(() => {});
+      }
+    });
   }
   return { items: result.rows.map(mapCaseRow), pagination: { limit, offset, total: result.rowCount ? Number(result.rows[0].total_count) : 0 } };
 }

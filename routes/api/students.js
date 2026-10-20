@@ -553,58 +553,46 @@ router.get(
         s.jam_minggu_ini,
         s.jam_minggu_target,
         s.wfh_quota,
-        COUNT(DISTINCT lr.id)::int AS wfh_used,
-        COALESCE(
-          array_agg(DISTINCT rp.id) FILTER (WHERE rp.id IS NOT NULL),
-          ARRAY[]::text[]
-        ) AS research_project_ids,
-        COALESCE(
-          array_agg(DISTINCT rp.title) FILTER (WHERE rp.title IS NOT NULL),
-          ARRAY[]::text[]
-        ) AS research_projects,
-        COALESCE(
-          jsonb_agg(DISTINCT jsonb_build_object(
-            'project_id', rp.id,
-            'projectId', rp.id,
-            'title', rp.title,
-            'short_title', COALESCE(rp.short_title, rp.title),
-            'peran', ${buildResolvedProjectRoleSql({
-              studentIdExpr: "s.id",
-              userIdExpr: "u.id",
-              projectIdExpr: "rp.id"
-            })},
-            'bergabung', TO_CHAR(rm.bergabung, 'YYYY-MM-DD'),
-            'selesai', TO_CHAR(rm.selesai, 'YYYY-MM-DD'),
-            'status', rm.status
-          )) FILTER (WHERE rp.id IS NOT NULL),
-          '[]'::jsonb
-        ) AS research_memberships
+        COALESCE(wfh.wfh_used, 0) AS wfh_used,
+        COALESCE(mem.research_project_ids, ARRAY[]::text[]) AS research_project_ids,
+        COALESCE(mem.research_projects, ARRAY[]::text[]) AS research_projects,
+        COALESCE(mem.research_memberships, '[]'::jsonb) AS research_memberships
       FROM students s
       JOIN users u ON u.id = s.user_id
-      LEFT JOIN research_memberships rm ON rm.user_id = u.id AND rm.member_type = 'Mahasiswa'
-      LEFT JOIN research_projects rp ON rp.id = rm.project_id
-      LEFT JOIN leave_requests lr ON lr.student_id = s.id AND lr.jenis_pengajuan = 'wfh' AND lr.status = 'Disetujui' AND lr.periode_start BETWEEN ${weekStartPlaceholder}::date AND ${weekEndPlaceholder}::date
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS wfh_used
+        FROM leave_requests lr
+        WHERE lr.student_id = s.id
+          AND lr.jenis_pengajuan = 'wfh'
+          AND lr.status = 'Disetujui'
+          AND lr.periode_start BETWEEN ${weekStartPlaceholder}::date AND ${weekEndPlaceholder}::date
+      ) wfh ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT
+          COALESCE(array_agg(rp.id), ARRAY[]::text[]) AS research_project_ids,
+          COALESCE(array_agg(rp.title), ARRAY[]::text[]) AS research_projects,
+          COALESCE(
+            jsonb_agg(jsonb_build_object(
+              'project_id', rp.id,
+              'projectId', rp.id,
+              'title', rp.title,
+              'short_title', COALESCE(rp.short_title, rp.title),
+              'peran', ${buildResolvedProjectRoleSql({
+                studentIdExpr: "s.id",
+                userIdExpr: "u.id",
+                projectIdExpr: "rp.id"
+              })},
+              'bergabung', TO_CHAR(rm.bergabung, 'YYYY-MM-DD'),
+              'selesai', TO_CHAR(rm.selesai, 'YYYY-MM-DD'),
+              'status', rm.status
+            )),
+            '[]'::jsonb
+          ) AS research_memberships
+        FROM research_memberships rm
+        JOIN research_projects rp ON rp.id = rm.project_id
+        WHERE rm.user_id = u.id AND rm.member_type = 'Mahasiswa'
+      ) mem ON TRUE
       ${whereClause}
-      GROUP BY 
-        s.id,
-        u.name,
-        u.initials,
-        u.photo_url,
-        u.prodi,
-        s.angkatan,
-        u.email,
-        s.phone,
-        s.fakultas,
-        s.status,
-        s.tipe,
-        s.bergabung,
-        s.pembimbing,
-        s.kehadiran,
-        s.total_hari,
-        s.logbook_count,
-        s.jam_minggu_ini,
-        s.jam_minggu_target,
-        s.wfh_quota
       ORDER BY ${sortColumn} ${sortDir}, s.id ASC
       LIMIT ${limitPlaceholder}
       OFFSET ${offsetPlaceholder}
@@ -653,58 +641,46 @@ router.get(
         s.jam_minggu_ini,
         s.jam_minggu_target,
         s.wfh_quota,
-        COUNT(DISTINCT lr.id)::int AS wfh_used,
-        COALESCE(
-          array_agg(DISTINCT rp.id) FILTER (WHERE rp.id IS NOT NULL),
-          ARRAY[]::text[]
-        ) AS research_project_ids,
-        COALESCE(
-          array_agg(DISTINCT rp.title) FILTER (WHERE rp.title IS NOT NULL),
-          ARRAY[]::text[]
-        ) AS research_projects,
-        COALESCE(
-          jsonb_agg(DISTINCT jsonb_build_object(
-            'project_id', rp.id,
-            'projectId', rp.id,
-            'title', rp.title,
-            'short_title', COALESCE(rp.short_title, rp.title),
-            'peran', ${buildResolvedProjectRoleSql({
-              studentIdExpr: "s.id",
-              userIdExpr: "u.id",
-              projectIdExpr: "rp.id"
-            })},
-            'bergabung', TO_CHAR(rm.bergabung, 'YYYY-MM-DD'),
-            'selesai', TO_CHAR(rm.selesai, 'YYYY-MM-DD'),
-            'status', rm.status
-          )) FILTER (WHERE rp.id IS NOT NULL),
-          '[]'::jsonb
-        ) AS research_memberships
+        COALESCE(wfh.wfh_used, 0) AS wfh_used,
+        COALESCE(mem.research_project_ids, ARRAY[]::text[]) AS research_project_ids,
+        COALESCE(mem.research_projects, ARRAY[]::text[]) AS research_projects,
+        COALESCE(mem.research_memberships, '[]'::jsonb) AS research_memberships
       FROM students s
       JOIN users u ON u.id = s.user_id
-      LEFT JOIN research_memberships rm ON rm.user_id = u.id AND rm.member_type = 'Mahasiswa'
-      LEFT JOIN research_projects rp ON rp.id = rm.project_id
-      LEFT JOIN leave_requests lr ON lr.student_id = s.id AND lr.jenis_pengajuan = 'wfh' AND lr.status = 'Disetujui' AND lr.periode_start BETWEEN $2::date AND $3::date
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS wfh_used
+        FROM leave_requests lr
+        WHERE lr.student_id = s.id
+          AND lr.jenis_pengajuan = 'wfh'
+          AND lr.status = 'Disetujui'
+          AND lr.periode_start BETWEEN $2::date AND $3::date
+      ) wfh ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT
+          COALESCE(array_agg(rp.id), ARRAY[]::text[]) AS research_project_ids,
+          COALESCE(array_agg(rp.title), ARRAY[]::text[]) AS research_projects,
+          COALESCE(
+            jsonb_agg(jsonb_build_object(
+              'project_id', rp.id,
+              'projectId', rp.id,
+              'title', rp.title,
+              'short_title', COALESCE(rp.short_title, rp.title),
+              'peran', ${buildResolvedProjectRoleSql({
+                studentIdExpr: "s.id",
+                userIdExpr: "u.id",
+                projectIdExpr: "rp.id"
+              })},
+              'bergabung', TO_CHAR(rm.bergabung, 'YYYY-MM-DD'),
+              'selesai', TO_CHAR(rm.selesai, 'YYYY-MM-DD'),
+              'status', rm.status
+            )),
+            '[]'::jsonb
+          ) AS research_memberships
+        FROM research_memberships rm
+        JOIN research_projects rp ON rp.id = rm.project_id
+        WHERE rm.user_id = u.id AND rm.member_type = 'Mahasiswa'
+      ) mem ON TRUE
       WHERE s.id = $1
-      GROUP BY 
-        s.id,
-        u.name,
-        u.initials,
-        u.photo_url,
-        u.prodi,
-        s.angkatan,
-        u.email,
-        s.phone,
-        s.fakultas,
-        s.status,
-        s.tipe,
-        s.bergabung,
-        s.pembimbing,
-        s.kehadiran,
-        s.total_hari,
-        s.logbook_count,
-        s.jam_minggu_ini,
-        s.jam_minggu_target,
-        s.wfh_quota
       `,
       [studentId, weekBounds.startDate, weekBounds.endDate]
     );

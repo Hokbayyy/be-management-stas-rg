@@ -167,5 +167,30 @@ test("no destructive mass Web Developer UPDATE statements exist in codebase", as
   }
 });
 
+test("students endpoint queries avoid cartesian product and 18-column GROUP BY", async () => {
+  const fs = require("node:fs/promises");
+  const path = require("node:path");
+  const content = await fs.readFile(path.join(__dirname, "../routes/api/students.js"), "utf8");
+  assert.ok(!content.includes("COUNT(DISTINCT lr.id)::int AS wfh_used"), "students.js should not have COUNT(DISTINCT lr.id) cartesian product");
+  assert.ok(content.includes("SELECT COUNT(*)::int AS wfh_used"), "students.js should pre-aggregate wfh_used via lateral join");
+  assert.ok(content.includes("COALESCE(array_agg(rp.id)"), "students.js should pre-aggregate research_memberships via lateral join");
+});
+
+test("documentCenterFinalActivity listCases performs non-blocking background heal", async () => {
+  const fs = require("node:fs/promises");
+  const path = require("node:path");
+  const content = await fs.readFile(path.join(__dirname, "../utils/documentCenterFinalActivity.js"), "utf8");
+  assert.ok(content.includes("setImmediate(async () => {"), "listCases should run background heal via setImmediate");
+});
+
+test("logbooks GET endpoint supports pagination limit and offset", async () => {
+  const fs = require("node:fs/promises");
+  const path = require("node:path");
+  const content = await fs.readFile(path.join(__dirname, "../routes/api/logbooks.js"), "utf8");
+  assert.ok(content.includes("req.query.limit"), "logbooks.js should parse limit from req.query");
+  assert.ok(content.includes("req.query.offset"), "logbooks.js should parse offset from req.query");
+  assert.ok(content.includes("${paginationClause}"), "logbooks.js SQL query should include paginationClause");
+});
+
 
 

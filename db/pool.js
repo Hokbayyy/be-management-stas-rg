@@ -1,15 +1,20 @@
 const { Pool } = require("pg");
 const env = require("../config/env");
 
-const poolConfig = env.databaseUrl
-  ? { connectionString: env.databaseUrl }
-  : {
-      host: env.dbHost,
-      port: env.dbPort,
-      database: env.dbName,
-      user: env.dbUser,
-      password: env.dbPassword
-    };
+const poolConfig = {
+  ...(env.databaseUrl
+    ? { connectionString: env.databaseUrl }
+    : {
+        host: env.dbHost,
+        port: env.dbPort,
+        database: env.dbName,
+        user: env.dbUser,
+        password: env.dbPassword
+      }),
+  max: 20,
+  connectionTimeoutMillis: 10000,
+  idleTimeoutMillis: 30000
+};
 
 const pool = new Pool(poolConfig);
 

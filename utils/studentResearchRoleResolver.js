@@ -118,10 +118,9 @@ function buildResolvedProjectRoleSql({
 }
 
 let ensureSpecificRolesPromise = null;
+let backgroundHealTimer = null;
 
-async function ensureSpecificStudentResearchRoles() {
-  if (!ensureSpecificRolesPromise) {
-    ensureSpecificRolesPromise = (async () => {
+async function executeRoleRecoveryQueries() {
       await pool.query(`
         CREATE TABLE IF NOT EXISTS research_divisions (
           id TEXT PRIMARY KEY,
@@ -363,18 +362,22 @@ async function ensureSpecificStudentResearchRoles() {
             )
           )
       `).catch(() => {});
-    })().finally(() => {
-      // Allow re-evaluation after 5 seconds if roles/divisions were modified externally
-      setTimeout(() => {
-        ensureSpecificRolesPromise = null;
-      }, 5000).unref?.();
+}
+
+async function ensureSpecificStudentResearchRoles() {
+  if (!ensureSpecificRolesPromise) {
+    ensureSpecificRolesPromise = executeRoleRecoveryQueries().catch((err) => {
+      console.warn("[studentResearchRoleResolver] Role recovery queries failed:", err?.message);
     });
   }
   await ensureSpecificRolesPromise;
 }
 
 function invalidateSpecificStudentResearchRolesCache() {
-  ensureSpecificRolesPromise = null;
+  if (backgroundHealTimer) clearTimeout(backgroundHealTimer);
+  backgroundHealTimer = setTimeout(() => {
+    executeRoleRecoveryQueries().catch(() => {});
+  }, 1000).unref?.();
 }
 
 module.exports = {
