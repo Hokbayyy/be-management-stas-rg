@@ -31,6 +31,12 @@ const {
 const {
   healStudentFinalActivityCases
 } = require("../../utils/documentCenterFinalActivity");
+const {
+  SQL_GENERIC_ROLES_LIST,
+  buildResolvedProjectRoleSql,
+  ensureSpecificStudentResearchRoles,
+  invalidateSpecificStudentResearchRolesCache
+} = require("../../utils/studentResearchRoleResolver");
 
 const router = express.Router();
 let ensureStudentColumnsPromise = null;
@@ -80,49 +86,12 @@ async function ensureStudentColumns() {
         ADD COLUMN IF NOT EXISTS selesai DATE
       `);
 
-      await query(`
-        UPDATE research_memberships rm
-        SET peran = COALESCE(
-          (
-            SELECT BTRIM(gsp.position_label)
-            FROM students s
-            JOIN graduation_submission_projects gsp
-              ON gsp.student_id = s.id
-             AND gsp.project_id = rm.project_id
-            WHERE s.user_id = rm.user_id
-              AND LOWER(BTRIM(COALESCE(gsp.position_label, ''))) NOT IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta')
-            LIMIT 1
-          ),
-          'Web Developer'
-        )
-        WHERE rm.member_type = 'Mahasiswa'
-          AND LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta')
-      `).catch(() => {});
-
-      await query(`
-        UPDATE graduation_submission_projects gsp
-        SET position_label = COALESCE(
-          (
-            SELECT BTRIM(rm.peran)
-            FROM students s
-            JOIN research_memberships rm
-              ON rm.user_id = s.user_id
-             AND rm.project_id = gsp.project_id
-             AND rm.member_type = 'Mahasiswa'
-            WHERE s.id = gsp.student_id
-              AND LOWER(BTRIM(COALESCE(rm.peran, ''))) NOT IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta')
-            LIMIT 1
-          ),
-          'Web Developer'
-        )
-        WHERE LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta')
-      `).catch(() => {});
-
       await ensureStudentDocumentsTable();
     })();
   }
 
   await ensureStudentColumnsPromise;
+  await ensureSpecificStudentResearchRoles();
 }
 
 async function ensureStudentPeriodsTable() {
@@ -421,18 +390,34 @@ async function syncStudentResearchMemberships({ userId, studentStatus = null, re
     executor,
     `
     UPDATE graduation_submission_projects gsp
-    SET position_label = rm.peran,
-        updated_at = NOW()
+    SET position_label = rm.peran
     FROM students s, research_memberships rm
     WHERE s.user_id = $1
       AND gsp.student_id = s.id
       AND rm.user_id = $1
       AND rm.project_id = gsp.project_id
       AND rm.member_type = 'Mahasiswa'
-      AND LOWER(BTRIM(COALESCE(rm.peran, ''))) NOT IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta')
+      AND LOWER(BTRIM(COALESCE(rm.peran, ''))) NOT IN (${SQL_GENERIC_ROLES_LIST})
     `,
     [userId]
   ).catch(() => {});
+
+  await runQuery(
+    executor,
+    `
+    UPDATE research_memberships rm
+    SET division_id = rd.id
+    FROM research_divisions rd
+    WHERE rm.user_id = $1
+      AND rm.member_type = 'Mahasiswa'
+      AND rd.project_id = rm.project_id
+      AND LOWER(BTRIM(rd.name)) = LOWER(BTRIM(COALESCE(rm.peran, '')))
+      AND rm.division_id IS DISTINCT FROM rd.id
+    `,
+    [userId]
+  ).catch(() => {});
+
+  invalidateSpecificStudentResearchRolesCache();
 }
 
 function getRequestBaseUrl(req) {
@@ -583,10 +568,11 @@ router.get(
             'projectId', rp.id,
             'title', rp.title,
             'short_title', COALESCE(rp.short_title, rp.title),
-            'peran', COALESCE(
-              CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm.peran) END,
-              'Web Developer'
-            ),
+            'peran', ${buildResolvedProjectRoleSql({
+              studentIdExpr: "s.id",
+              userIdExpr: "u.id",
+              projectIdExpr: "rp.id"
+            })},
             'bergabung', TO_CHAR(rm.bergabung, 'YYYY-MM-DD'),
             'selesai', TO_CHAR(rm.selesai, 'YYYY-MM-DD'),
             'status', rm.status
@@ -682,10 +668,11 @@ router.get(
             'projectId', rp.id,
             'title', rp.title,
             'short_title', COALESCE(rp.short_title, rp.title),
-            'peran', COALESCE(
-              CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm.peran) END,
-              'Web Developer'
-            ),
+            'peran', ${buildResolvedProjectRoleSql({
+              studentIdExpr: "s.id",
+              userIdExpr: "u.id",
+              projectIdExpr: "rp.id"
+            })},
             'bergabung', TO_CHAR(rm.bergabung, 'YYYY-MM-DD'),
             'selesai', TO_CHAR(rm.selesai, 'YYYY-MM-DD'),
             'status', rm.status

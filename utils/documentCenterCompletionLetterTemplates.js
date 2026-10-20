@@ -16,6 +16,10 @@ const {
   getTemplateDirectory,
   openPrivateTemplateVersion
 } = require("./documentCenterStorage");
+const {
+  pickBestResolvedRole,
+  buildResolvedProjectRoleSql
+} = require("./studentResearchRoleResolver");
 
 const TEMPLATE_KEY = "completion_letter_completed_internship";
 const TEMPLATE_ID = "DCTPL-COMPLETE-MAGANG-01";
@@ -588,27 +592,12 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
       `SELECT cp.*,
               COALESCE(
                 (
-                  SELECT COALESCE(
-                    CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm.peran) END,
-                    CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(gsp.position_label) END,
-                    CASE WHEN LOWER(BTRIM(COALESCE(rm_primary.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm_primary.peran) END
-                  )
+                  SELECT ${buildResolvedProjectRoleSql({
+                    studentIdExpr: "s.id",
+                    userIdExpr: "s.user_id",
+                    projectIdExpr: "cp.legacy_project_id"
+                  })}
                   FROM students s
-                  LEFT JOIN graduation_submission_projects gsp
-                    ON gsp.student_id = s.id
-                   AND gsp.project_id = cp.legacy_project_id
-                  LEFT JOIN research_memberships rm
-                    ON rm.user_id = s.user_id
-                   AND rm.project_id = cp.legacy_project_id
-                   AND rm.member_type = 'Mahasiswa'
-                  LEFT JOIN LATERAL (
-                    SELECT rm_f.peran
-                    FROM research_memberships rm_f
-                    WHERE rm_f.user_id = s.user_id
-                      AND rm_f.member_type = 'Mahasiswa'
-                    ORDER BY rm_f.id ASC
-                    LIMIT 1
-                  ) rm_primary ON TRUE
                   WHERE s.id = $2
                   LIMIT 1
                 ),
@@ -621,19 +610,13 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
       [caseId, caseRow.legacy_student_id]
     );
     if (projectResult.rowCount < 1) throw httpError(409, "Surat hanya dapat dibuat untuk case yang memiliki project.");
-    const isGenericRole = (val) => {
-      const n = typeof val === "string" ? val.trim().toLowerCase() : "";
-      return !n || ["alumni", "anggota", "anggota riset", "peserta magang", "mahasiswa", "peserta"].includes(n);
-    };
     const projectRows = [];
     for (const row of projectResult.rows) {
       const snapshotRole = typeof row.project_snapshot?.role === "string" ? row.project_snapshot.role.trim() : "";
       const resolvedRole = typeof row.resolved_project_role === "string" ? row.resolved_project_role.trim() : "";
-      if (
-        resolvedRole &&
-        (!snapshotRole || isGenericRole(snapshotRole))
-      ) {
-        const nextSnapshot = { ...(row.project_snapshot || {}), role: resolvedRole };
+      const targetRole = pickBestResolvedRole(resolvedRole, snapshotRole);
+      if (targetRole && snapshotRole !== targetRole) {
+        const nextSnapshot = { ...(row.project_snapshot || {}), role: targetRole };
         await client.query(
           "UPDATE dc_final_activity_case_projects SET project_snapshot = $2::jsonb, updated_at = NOW() WHERE id = $1",
           [row.id, JSON.stringify(nextSnapshot)]

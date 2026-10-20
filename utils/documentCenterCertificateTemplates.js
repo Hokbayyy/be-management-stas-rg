@@ -16,6 +16,11 @@ const {
   getTemplateDirectory,
   openPrivateTemplateVersion
 } = require("./documentCenterStorage");
+const {
+  SQL_GENERIC_ROLES_LIST,
+  pickBestResolvedRole,
+  buildResolvedProjectRoleSql
+} = require("./studentResearchRoleResolver");
 
 const PAGE_WIDTH = 842.25;
 const PAGE_HEIGHT = 595.5;
@@ -648,27 +653,16 @@ async function generateCertificateDraft({ id, authUser, ip }) {
                FROM graduation_submission_projects gsp
                WHERE gsp.student_id = c.legacy_student_id
                  AND gsp.project_id = cp.legacy_project_id
-                 AND LOWER(BTRIM(COALESCE(gsp.position_label, ''))) NOT IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta')
+                 AND LOWER(BTRIM(COALESCE(gsp.position_label, ''))) NOT IN (${SQL_GENERIC_ROLES_LIST})
                LIMIT 1
              ) AS graduation_position_label,
              (
-               SELECT COALESCE(
-                 CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm.peran) END,
-                 CASE WHEN LOWER(BTRIM(COALESCE(rm_primary.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm_primary.peran) END
-               )
+               SELECT ${buildResolvedProjectRoleSql({
+                 studentIdExpr: "s.id",
+                 userIdExpr: "s.user_id",
+                 projectIdExpr: "cp.legacy_project_id"
+               })}
                FROM students s
-               LEFT JOIN research_memberships rm
-                 ON rm.user_id = s.user_id
-                AND rm.project_id = cp.legacy_project_id
-                AND rm.member_type = 'Mahasiswa'
-               LEFT JOIN LATERAL (
-                 SELECT rm_f.peran
-                 FROM research_memberships rm_f
-                 WHERE rm_f.user_id = s.user_id
-                   AND rm_f.member_type = 'Mahasiswa'
-                 ORDER BY rm_f.id ASC
-                 LIMIT 1
-               ) rm_primary ON TRUE
                WHERE s.id = c.legacy_student_id
                LIMIT 1
              ) AS rm_peran
@@ -684,17 +678,11 @@ async function generateCertificateDraft({ id, authUser, ip }) {
     if (row.outcome !== "completed" || !["Magang", "Riset"].includes(row.activity_type) || row.certificate_required !== true || row.certificate_status !== "pending" || row.certificate_document_id || row.case_status === "revoked") {
       throw httpError(409, "Sertifikat tidak dapat dibuatkan draft generator.");
     }
-    const isGenericRole = (val) => {
-      const n = typeof val === "string" ? val.trim().toLowerCase() : "";
-      return !n || ["alumni", "anggota", "anggota riset", "peserta magang", "mahasiswa", "peserta"].includes(n);
-    };
-    const resolvedRole = !isGenericRole(row.project_snapshot?.role)
-      ? String(row.project_snapshot.role).trim()
-      : !isGenericRole(row.rm_peran)
-        ? String(row.rm_peran).trim()
-        : !isGenericRole(row.graduation_position_label)
-          ? String(row.graduation_position_label).trim()
-          : "Web Developer";
+    const resolvedRole = pickBestResolvedRole(
+      row.rm_peran,
+      row.graduation_position_label,
+      row.project_snapshot?.role
+    );
     if (row.project_snapshot?.role !== resolvedRole) {
       row.project_snapshot = { ...(row.project_snapshot || {}), role: resolvedRole };
       await client.query(

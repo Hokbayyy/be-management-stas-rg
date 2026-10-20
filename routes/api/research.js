@@ -17,6 +17,14 @@ const {
 } = require("../../utils/researchBoardStore");
 const { createNotification } = require("../../utils/notificationService");
 const { requireSafeId } = require("../../utils/securityValidation");
+const {
+  healStudentFinalActivityCases
+} = require("../../utils/documentCenterFinalActivity");
+const {
+  isGenericOrAlumniRole,
+  invalidateSpecificStudentResearchRolesCache,
+  SQL_GENERIC_ROLES_LIST
+} = require("../../utils/studentResearchRoleResolver");
 
 const router = express.Router();
 let ensureResearchAttachmentLinkPromise = null;
@@ -3488,7 +3496,8 @@ router.post(
       return res.status(403).json({ message: "Akses ditolak menambah anggota di riset ini." });
     }
 
-    const { userId, memberType, peran, status = "Aktif", bergabung } = req.body;
+    const { userId, memberType, peran, status = "Aktif", bergabung, divisionId, division_id } = req.body;
+    const resolvedDivisionId = divisionId || division_id || null;
 
     if (!userId || !memberType) {
       return res.status(400).json({ message: "userId dan memberType wajib diisi." });
@@ -3505,17 +3514,35 @@ router.post(
 
     const insertResult = await query(
       `
-      INSERT INTO research_memberships (project_id, user_id, member_type, peran, status, bergabung)
-      VALUES ($1, $2, $3, $4, $5, $6)
+      INSERT INTO research_memberships (project_id, user_id, member_type, peran, status, bergabung, division_id)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
       ON CONFLICT (project_id, user_id)
       DO UPDATE SET member_type = EXCLUDED.member_type,
                     peran = EXCLUDED.peran,
                     status = EXCLUDED.status,
-                    bergabung = EXCLUDED.bergabung
-      RETURNING project_id, user_id, member_type, peran, status
+                    bergabung = EXCLUDED.bergabung,
+                    division_id = COALESCE(EXCLUDED.division_id, research_memberships.division_id)
+      RETURNING project_id, user_id, member_type, peran, status, division_id
       `,
-      [req.params.id, userId, memberType, peran || null, status, bergabung || null]
+      [req.params.id, userId, memberType, peran || null, status, bergabung || null, resolvedDivisionId]
     );
+
+    if (memberType === "Mahasiswa") {
+      const studentRow = await query("SELECT id FROM students WHERE user_id = $1 LIMIT 1", [userId]);
+      if (studentRow.rowCount > 0) {
+        const studentId = studentRow.rows[0].id;
+        if (peran && !isGenericOrAlumniRole(peran)) {
+          await query(
+            `UPDATE graduation_submission_projects
+             SET position_label = $3
+             WHERE student_id = $1 AND project_id = $2`,
+            [studentId, req.params.id, peran]
+          ).catch(() => {});
+        }
+        invalidateSpecificStudentResearchRolesCache();
+        await healStudentFinalActivityCases(studentId).catch(() => {});
+      }
+    }
 
     res.status(201).json({ message: "Anggota riset berhasil disimpan." });
   })
@@ -3533,7 +3560,8 @@ router.patch(
       return res.status(403).json({ message: "Akses ditolak mengubah anggota riset ini." });
     }
 
-    const { memberType, peran, status, bergabung } = req.body;
+    const { memberType, peran, status, bergabung, divisionId, division_id } = req.body;
+    const resolvedDivisionId = divisionId !== undefined ? divisionId : (division_id !== undefined ? division_id : undefined);
 
     if (peran !== undefined || memberType !== undefined) {
       const existingMember = await query(
@@ -3563,15 +3591,35 @@ router.patch(
       SET member_type = COALESCE($3, member_type),
           peran = COALESCE($4, peran),
           status = COALESCE($5, status),
-          bergabung = COALESCE($6, bergabung)
+          bergabung = COALESCE($6, bergabung),
+          division_id = CASE WHEN $7::boolean THEN $8 ELSE division_id END
       WHERE project_id = $1 AND user_id = $2
-      RETURNING id
+      RETURNING id, member_type, peran
       `,
-      [req.params.id, req.params.userId, memberType, peran, status, bergabung]
+      [req.params.id, req.params.userId, memberType, peran, status, bergabung, resolvedDivisionId !== undefined, resolvedDivisionId || null]
     );
 
     if (result.rowCount === 0) {
       return res.status(404).json({ message: "Anggota riset tidak ditemukan." });
+    }
+
+    const updatedMember = result.rows[0];
+    if (updatedMember.member_type === "Mahasiswa") {
+      const studentRow = await query("SELECT id FROM students WHERE user_id = $1 LIMIT 1", [req.params.userId]);
+      if (studentRow.rowCount > 0) {
+        const studentId = studentRow.rows[0].id;
+        const targetPeran = peran || updatedMember.peran;
+        if (targetPeran && !isGenericOrAlumniRole(targetPeran)) {
+          await query(
+            `UPDATE graduation_submission_projects
+             SET position_label = $3
+             WHERE student_id = $1 AND project_id = $2`,
+            [studentId, req.params.id, targetPeran]
+          ).catch(() => {});
+        }
+        invalidateSpecificStudentResearchRolesCache();
+        await healStudentFinalActivityCases(studentId).catch(() => {});
+      }
     }
 
     res.json({ message: "Anggota riset berhasil diperbarui." });
@@ -3590,6 +3638,8 @@ router.delete(
       return res.status(403).json({ message: "Akses ditolak menghapus anggota riset ini." });
     }
 
+    const studentRow = await query("SELECT id FROM students WHERE user_id = $1 LIMIT 1", [req.params.userId]);
+
     const result = await query(
       "DELETE FROM research_memberships WHERE project_id = $1 AND user_id = $2 RETURNING id",
       [req.params.id, req.params.userId]
@@ -3597,6 +3647,11 @@ router.delete(
 
     if (result.rowCount === 0) {
       return res.status(404).json({ message: "Anggota riset tidak ditemukan." });
+    }
+
+    if (studentRow.rowCount > 0) {
+      invalidateSpecificStudentResearchRolesCache();
+      await healStudentFinalActivityCases(studentRow.rows[0].id).catch(() => {});
     }
 
     res.json({ message: "Anggota riset berhasil dihapus." });

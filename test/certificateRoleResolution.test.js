@@ -109,5 +109,63 @@ test("modified backend modules load cleanly and prioritize specific research_mem
   assert.ok(documentCenterRouter);
 });
 
+test("studentResearchRoleResolver correctly resolves and prioritizes roles", () => {
+  const {
+    isGenericOrAlumniRole,
+    pickBestResolvedRole,
+    buildResolvedProjectRoleSql,
+    SQL_GENERIC_ROLES_LIST
+  } = require("../utils/studentResearchRoleResolver");
+
+  // Generic identification
+  assert.equal(isGenericOrAlumniRole("Alumni"), true);
+  assert.equal(isGenericOrAlumniRole("anggota"), true);
+  assert.equal(isGenericOrAlumniRole("Anggota Riset"), true);
+  assert.equal(isGenericOrAlumniRole("Peserta Magang"), true);
+  assert.equal(isGenericOrAlumniRole("Web Developer"), false);
+  assert.equal(isGenericOrAlumniRole("Mobile Developer"), false);
+  assert.equal(isGenericOrAlumniRole("UI/UX Designer"), false);
+
+  // pickBestResolvedRole: specific role wins over fallback "Web Developer"
+  assert.equal(pickBestResolvedRole("Mobile Developer", "Web Developer"), "Mobile Developer");
+  assert.equal(pickBestResolvedRole("Web Developer", "Mobile Developer"), "Mobile Developer");
+  assert.equal(pickBestResolvedRole("Backend Engineer", "Frontend Engineer"), "Backend Engineer");
+  assert.equal(pickBestResolvedRole("", "Data Scientist"), "Data Scientist");
+  assert.equal(pickBestResolvedRole("Alumni", "Anggota", "AI Researcher"), "AI Researcher");
+  assert.equal(pickBestResolvedRole("Alumni", "Anggota"), "Web Developer");
+  assert.equal(pickBestResolvedRole(null, undefined, ""), "Web Developer");
+
+  // SQL generator
+  const sql = buildResolvedProjectRoleSql({
+    studentIdExpr: "s.id",
+    userIdExpr: "s.user_id",
+    projectIdExpr: "rp.id"
+  });
+  assert.ok(sql.includes("research_divisions"), "SQL should check research_divisions");
+  assert.ok(sql.includes("graduation_submission_projects"), "SQL should check graduation_submission_projects");
+  assert.ok(sql.includes("research_memberships"), "SQL should check research_memberships");
+  assert.ok(sql.includes(SQL_GENERIC_ROLES_LIST), "SQL should use SQL_GENERIC_ROLES_LIST");
+});
+
+test("no destructive mass Web Developer UPDATE statements exist in codebase", async () => {
+  const fs = require("node:fs/promises");
+  const path = require("node:path");
+  const filesToCheck = [
+    "../routes/api/students.js",
+    "../routes/api/research.js",
+    "../utils/documentCenterFinalActivity.js",
+    "../utils/studentResearchRoleResolver.js"
+  ];
+  for (const rel of filesToCheck) {
+    const content = await fs.readFile(path.join(__dirname, rel), "utf8");
+    // Destructive pattern: UPDATE research_memberships rm SET peran = ... 'Web Developer' WHERE ... IN ('', 'alumni'...)
+    assert.equal(
+      /UPDATE\s+research_memberships\s+rm\s+SET\s+peran\s*=\s*COALESCE\s*\(\s*\(\s*SELECT[\s\S]*?'Web Developer'[\s\S]*?WHERE\s+rm\.member_type\s*=\s*'Mahasiswa'\s+AND\s+LOWER/i.test(content),
+      false,
+      `${rel} should not contain destructive mass Web Developer UPDATE on research_memberships`
+    );
+  }
+});
+
 
 

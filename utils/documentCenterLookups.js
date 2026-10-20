@@ -1,5 +1,9 @@
 const { query } = require("../db/pool");
 const { requireSafeId } = require("./securityValidation");
+const {
+  buildResolvedProjectRoleSql,
+  ensureSpecificStudentResearchRoles
+} = require("./studentResearchRoleResolver");
 
 function inputError() {
   const error = new Error("Input tidak valid.");
@@ -67,21 +71,15 @@ async function listStudentPeriods(id) {
 async function listStudentProjects(id) {
   const studentId = requireSafeId(id, "id");
   await requireStudent(studentId);
+  await ensureSpecificStudentResearchRoles();
   const result = await query(`
     SELECT rp.id, rp.title, rp.short_title, rp.period_text, rp.status AS project_status,
            rm.status AS membership_status,
-           COALESCE(
-             CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm.peran) END,
-             (
-               SELECT BTRIM(gsp.position_label)
-               FROM graduation_submission_projects gsp
-               WHERE gsp.student_id = s.id
-                 AND gsp.project_id = rp.id
-                 AND LOWER(BTRIM(COALESCE(gsp.position_label, ''))) NOT IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta')
-               LIMIT 1
-             ),
-             'Web Developer'
-           ) AS peran,
+           ${buildResolvedProjectRoleSql({
+             studentIdExpr: "s.id",
+             userIdExpr: "s.user_id",
+             projectIdExpr: "rp.id"
+           })} AS peran,
            TO_CHAR(rm.bergabung, 'YYYY-MM-DD') AS joined_at,
            TO_CHAR(rm.selesai, 'YYYY-MM-DD') AS completed_at
     FROM students s JOIN research_memberships rm ON rm.user_id = s.user_id

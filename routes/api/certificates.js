@@ -6,6 +6,9 @@ const { resolveStudentId } = require("../../utils/studentResolver");
 const fs = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
+const {
+  buildResolvedProjectRoleSql
+} = require("../../utils/studentResearchRoleResolver");
 
 const router = express.Router();
 const CERT_UPLOAD_DIR = path.join(__dirname, "../../public/uploads/certificates");
@@ -161,18 +164,11 @@ router.get(
         s.nim,
         rp.id AS project_id,
         COALESCE(rp.short_title, rp.title) AS project_name,
-        COALESCE(
-          CASE WHEN LOWER(BTRIM(COALESCE(rm_mahasiswa.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm_mahasiswa.peran) END,
-          (
-            SELECT BTRIM(gsp.position_label)
-            FROM graduation_submission_projects gsp
-            WHERE gsp.student_id = s.id
-              AND gsp.project_id = rp.id
-              AND LOWER(BTRIM(COALESCE(gsp.position_label, ''))) NOT IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta')
-            LIMIT 1
-          ),
-          'Web Developer'
-        ) AS student_role,
+        ${buildResolvedProjectRoleSql({
+          studentIdExpr: "s.id",
+          userIdExpr: "s.user_id",
+          projectIdExpr: "rp.id"
+        })} AS student_role,
         cr.requested_by,
         ru.name AS requested_by_name,
         COALESCE(cr.status, 'Belum Diminta') AS status,

@@ -11,6 +11,10 @@ const {
   buildVersionFilePath,
   getVersionDirectory
 } = require("./documentCenterStorage");
+const {
+  buildResolvedProjectRoleSql,
+  ensureSpecificStudentResearchRoles
+} = require("./studentResearchRoleResolver");
 
 const MAX_RAW_PDF_BYTES = 8 * 1024 * 1024;
 const MAX_PARTICIPANTS = 100;
@@ -260,6 +264,7 @@ async function resolveParticipantSnapshots(participants, definition) {
   const requestedProjects = participants.filter((participant) => participant.legacyProjectId);
   const projectsByStudentAndId = new Map();
   if (requestedProjects.length > 0) {
+    await ensureSpecificStudentResearchRoles();
     const projectResult = await pool.query(
       `
       WITH requested(student_id, project_id) AS (
@@ -267,18 +272,11 @@ async function resolveParticipantSnapshots(participants, definition) {
       )
       SELECT requested.student_id, rp.id, rp.title, rp.short_title, rp.period_text,
              rp.status AS project_status, rm.status AS membership_status,
-             COALESCE(
-               CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm.peran) END,
-               (
-                 SELECT BTRIM(gsp.position_label)
-                 FROM graduation_submission_projects gsp
-                 WHERE gsp.student_id = s.id
-                   AND gsp.project_id = rp.id
-                   AND LOWER(BTRIM(COALESCE(gsp.position_label, ''))) NOT IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta')
-                 LIMIT 1
-               ),
-               'Web Developer'
-             ) AS peran,
+             ${buildResolvedProjectRoleSql({
+               studentIdExpr: "s.id",
+               userIdExpr: "s.user_id",
+               projectIdExpr: "rp.id"
+             })} AS peran,
              rm.bergabung, rm.selesai
       FROM requested
       JOIN students s ON s.id = requested.student_id

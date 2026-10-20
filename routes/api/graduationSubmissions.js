@@ -15,6 +15,11 @@ const {
   mapSubmissionRow,
   mapSubmissionProjectRow
 } = require("../../utils/graduationSubmissions");
+const {
+  buildResolvedProjectRoleSql,
+  ensureSpecificStudentResearchRoles,
+  invalidateSpecificStudentResearchRolesCache
+} = require("../../utils/studentResearchRoleResolver");
 
 const router = express.Router();
 
@@ -150,15 +155,17 @@ async function getStudentByUserId(userId) {
 }
 
 async function getActiveGraduationProjects(userId) {
+  await ensureSpecificStudentResearchRoles();
   const result = await query(
     `
     SELECT rp.id AS project_id,
            COALESCE(rp.short_title, rp.title, rp.id) AS project_title,
            rp.title AS full_title,
-           COALESCE(
-             CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm.peran) END,
-             'Web Developer'
-           ) AS position_label,
+           ${buildResolvedProjectRoleSql({
+             studentIdExpr: "(SELECT s_act.id FROM students s_act WHERE s_act.user_id = $1 LIMIT 1)",
+             userIdExpr: "$1",
+             projectIdExpr: "rp.id"
+           })} AS position_label,
            rm.bergabung,
            rm.selesai
     FROM research_memberships rm
@@ -176,6 +183,7 @@ async function getActiveGraduationProjects(userId) {
 }
 
 async function getSavedSubmission(studentId) {
+  await ensureSpecificStudentResearchRoles();
   const submissionResult = await query(
     `
     SELECT *
@@ -197,8 +205,16 @@ async function getSavedSubmission(studentId) {
     `
     SELECT gsp.*,
            COALESCE(
-             CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm.peran) END,
-             CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(gsp.position_label) END,
+             (
+               SELECT ${buildResolvedProjectRoleSql({
+                 studentIdExpr: "s.id",
+                 userIdExpr: "s.user_id",
+                 projectIdExpr: "gsp.project_id"
+               })}
+               FROM students s
+               WHERE s.id = gsp.student_id
+               LIMIT 1
+             ),
              'Web Developer'
            ) AS position_label
     FROM graduation_submission_projects gsp
@@ -504,8 +520,16 @@ async function getSubmissionDetailById(submissionId) {
     `
     SELECT gsp.*,
            COALESCE(
-             CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm.peran) END,
-             CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(gsp.position_label) END,
+             (
+               SELECT ${buildResolvedProjectRoleSql({
+                 studentIdExpr: "s.id",
+                 userIdExpr: "s.user_id",
+                 projectIdExpr: "gsp.project_id"
+               })}
+               FROM students s
+               WHERE s.id = gsp.student_id
+               LIMIT 1
+             ),
              'Web Developer'
            ) AS position_label
     FROM graduation_submission_projects gsp
