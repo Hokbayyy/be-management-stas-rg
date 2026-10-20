@@ -71,25 +71,16 @@ async function listStudentProjects(id) {
     SELECT rp.id, rp.title, rp.short_title, rp.period_text, rp.status AS project_status,
            rm.status AS membership_status,
            COALESCE(
-             CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm.peran) END,
+             CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm.peran) END,
              (
                SELECT BTRIM(gsp.position_label)
                FROM graduation_submission_projects gsp
                WHERE gsp.student_id = s.id
                  AND gsp.project_id = rp.id
-                 AND LOWER(BTRIM(COALESCE(gsp.position_label, ''))) NOT IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa')
+                 AND LOWER(BTRIM(COALESCE(gsp.position_label, ''))) NOT IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta')
                LIMIT 1
              ),
-             CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm.peran) END,
-             (
-               SELECT BTRIM(gsp.position_label)
-               FROM graduation_submission_projects gsp
-               WHERE gsp.student_id = s.id
-                 AND gsp.project_id = rp.id
-                 AND LOWER(BTRIM(COALESCE(gsp.position_label, ''))) NOT IN ('', 'alumni')
-               LIMIT 1
-             ),
-             CASE WHEN s.tipe = 'Riset' THEN 'Anggota Riset' ELSE 'Peserta Magang' END
+             'Web Developer'
            ) AS peran,
            TO_CHAR(rm.bergabung, 'YYYY-MM-DD') AS joined_at,
            TO_CHAR(rm.selesai, 'YYYY-MM-DD') AS completed_at

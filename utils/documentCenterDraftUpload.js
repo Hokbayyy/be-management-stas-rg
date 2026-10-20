@@ -266,7 +266,19 @@ async function resolveParticipantSnapshots(participants, definition) {
         SELECT * FROM unnest($1::text[], $2::text[])
       )
       SELECT requested.student_id, rp.id, rp.title, rp.short_title, rp.period_text,
-             rp.status AS project_status, rm.status AS membership_status, rm.peran,
+             rp.status AS project_status, rm.status AS membership_status,
+             COALESCE(
+               CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm.peran) END,
+               (
+                 SELECT BTRIM(gsp.position_label)
+                 FROM graduation_submission_projects gsp
+                 WHERE gsp.student_id = s.id
+                   AND gsp.project_id = rp.id
+                   AND LOWER(BTRIM(COALESCE(gsp.position_label, ''))) NOT IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta')
+                 LIMIT 1
+               ),
+               'Web Developer'
+             ) AS peran,
              rm.bergabung, rm.selesai
       FROM requested
       JOIN students s ON s.id = requested.student_id
@@ -285,6 +297,11 @@ async function resolveParticipantSnapshots(participants, definition) {
       projectsByStudentAndId.set(`${row.student_id}:${row.id}`, row);
     }
   }
+
+  const isSpecificRole = (val) => {
+    const n = typeof val === "string" ? val.trim().toLowerCase() : "";
+    return Boolean(n) && !["alumni", "anggota", "anggota riset", "peserta magang", "mahasiswa", "peserta"].includes(n);
+  };
 
   const resolved = participants.map((participant, displayOrder) => {
     if (participant.externalName) {
@@ -386,9 +403,7 @@ async function resolveParticipantSnapshots(participants, definition) {
       periodSnapshot: periodSnapshotData
         ? `${periodSnapshotData.activityType}: ${periodSnapshotData.startDate}${periodSnapshotData.endDate ? ` s.d. ${periodSnapshotData.endDate}` : ""}`
         : null,
-      participantRole: (project?.peran && project.peran.trim().toLowerCase() !== "alumni")
-        ? project.peran
-        : (student.student_activity_type === "Riset" ? "Anggota Riset" : "Peserta Magang"),
+      participantRole: isSpecificRole(project?.peran) ? project.peran.trim() : "Web Developer",
       displayOrder,
       actualActivityType: periodSnapshotData?.activityType || null,
       studentActivityType: student.student_activity_type,
@@ -400,9 +415,7 @@ async function resolveParticipantSnapshots(participants, definition) {
             periodText: project.period_text || null,
             status: project.project_status,
             membershipStatus: project.membership_status,
-            role: (project.peran && project.peran.trim().toLowerCase() !== "alumni")
-              ? project.peran
-              : (student.student_activity_type === "Riset" ? "Anggota Riset" : "Peserta Magang"),
+            role: isSpecificRole(project.peran) ? project.peran.trim() : "Web Developer",
             joinedAt: project.bergabung || null,
             endedAt: project.selesai || null
           }

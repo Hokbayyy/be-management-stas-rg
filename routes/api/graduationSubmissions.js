@@ -155,7 +155,10 @@ async function getActiveGraduationProjects(userId) {
     SELECT rp.id AS project_id,
            COALESCE(rp.short_title, rp.title, rp.id) AS project_title,
            rp.title AS full_title,
-           rm.peran AS position_label,
+           COALESCE(
+             CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm.peran) END,
+             'Web Developer'
+           ) AS position_label,
            rm.bergabung,
            rm.selesai
     FROM research_memberships rm
@@ -194,10 +197,9 @@ async function getSavedSubmission(studentId) {
     `
     SELECT gsp.*,
            COALESCE(
-             CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm.peran) END,
-             CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(gsp.position_label) END,
-             CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm.peran) END,
-             gsp.position_label
+             CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm.peran) END,
+             CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(gsp.position_label) END,
+             'Web Developer'
            ) AS position_label
     FROM graduation_submission_projects gsp
     LEFT JOIN students s ON s.id = gsp.student_id
@@ -228,8 +230,8 @@ function mapActiveProjectRow(row, studentId) {
     project_id: row.project_id,
     projectTitle: row.project_title || row.full_title || row.project_id,
     project_title: row.project_title || row.full_title || row.project_id,
-    positionLabel: row.position_label || "Anggota",
-    position_label: row.position_label || "Anggota",
+    positionLabel: row.position_label || "Web Developer",
+    position_label: row.position_label || "Web Developer",
     reportUrl: "",
     report_url: "",
     productPhotoFolderUrl: "",
@@ -274,8 +276,8 @@ function buildProjectResponse({ student, submission, activeProjects, savedProjec
       ...(saved || {}),
       projectTitle: saved?.projectTitle || activeMapped?.projectTitle || projectId,
       project_title: saved?.project_title || activeMapped?.project_title || projectId,
-      positionLabel: activeMapped?.positionLabel || saved?.positionLabel || "Anggota",
-      position_label: activeMapped?.position_label || saved?.position_label || "Anggota",
+      positionLabel: activeMapped?.positionLabel || saved?.positionLabel || "Web Developer",
+      position_label: activeMapped?.position_label || saved?.position_label || "Web Developer",
       fieldReviews: saved?.fieldReviews || {},
       field_reviews: saved?.field_reviews || {},
       requiredSpecialFields: getRequiredSpecialFieldsForRole(activeMapped?.positionLabel || saved?.positionLabel),
@@ -370,7 +372,7 @@ function buildDraftProjectRows(payloadProjects, expectedProjects, savedProjects 
   return expectedProjects.map((project) => {
     const projectId = project.project_id || project.projectId;
     const payload = payloadByProject.get(projectId) || savedByProject.get(projectId) || {};
-    const positionLabel = project.position_label || project.positionLabel || payload.positionLabel || payload.position_label || "Anggota";
+    const positionLabel = project.position_label || project.positionLabel || payload.positionLabel || payload.position_label || "Web Developer";
 
     return {
       projectId,
@@ -407,7 +409,7 @@ function removeReviewsForChangedFields(existingProject, nextProject) {
 }
 
 function getRequiredReviewFieldsForProject(project) {
-  const positionLabel = project?.position_label || project?.positionLabel || "Anggota";
+  const positionLabel = project?.position_label || project?.positionLabel || "Web Developer";
   const requiredSpecialFields = getRequiredSpecialFieldsForRole(positionLabel);
   const keys = new Set(REQUIRED_COMMON_REVIEW_FIELD_KEYS);
 
@@ -502,10 +504,9 @@ async function getSubmissionDetailById(submissionId) {
     `
     SELECT gsp.*,
            COALESCE(
-             CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm.peran) END,
-             CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(gsp.position_label) END,
-             CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm.peran) END,
-             gsp.position_label
+             CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm.peran) END,
+             CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(gsp.position_label) END,
+             'Web Developer'
            ) AS position_label
     FROM graduation_submission_projects gsp
     LEFT JOIN students s ON s.id = gsp.student_id
@@ -550,7 +551,7 @@ function validateSubmissionProjects(payloadProjects, expectedProjects) {
       throw error;
     }
 
-    const positionLabel = project.position_label || project.positionLabel || "Anggota";
+    const positionLabel = project.position_label || project.positionLabel || "Web Developer";
     const specialFields = getRequiredSpecialFieldsForRole(positionLabel);
     const specialByKey = new Map(specialFields.map((item) => [item.key, item]));
 

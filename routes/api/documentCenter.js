@@ -398,6 +398,7 @@ router.get(
   asyncHandler(async (req, res) => {
     const student = await resolveStudentOrThrow(req);
     const documentId = requireSafeId(req.params.id);
+    await healCaseAlumniRoleByDocumentId(documentId).catch(() => {});
     const result = await query(
       `
       SELECT od.id, od.title, od.document_number, od.status, od.generated_from,
@@ -807,6 +808,7 @@ router.get(
   requireRoleStrict(["operator"]),
   asyncHandler(async (req, res) => {
     const documentId = requireSafeId(req.params.id);
+    await healCaseAlumniRoleByDocumentId(documentId).catch(() => {});
     const result = await query(
       `
       SELECT od.id, od.title, od.document_number, od.status, od.generated_from,

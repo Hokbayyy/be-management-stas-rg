@@ -80,6 +80,44 @@ async function ensureStudentColumns() {
         ADD COLUMN IF NOT EXISTS selesai DATE
       `);
 
+      await query(`
+        UPDATE research_memberships rm
+        SET peran = COALESCE(
+          (
+            SELECT BTRIM(gsp.position_label)
+            FROM students s
+            JOIN graduation_submission_projects gsp
+              ON gsp.student_id = s.id
+             AND gsp.project_id = rm.project_id
+            WHERE s.user_id = rm.user_id
+              AND LOWER(BTRIM(COALESCE(gsp.position_label, ''))) NOT IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta')
+            LIMIT 1
+          ),
+          'Web Developer'
+        )
+        WHERE rm.member_type = 'Mahasiswa'
+          AND LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta')
+      `).catch(() => {});
+
+      await query(`
+        UPDATE graduation_submission_projects gsp
+        SET position_label = COALESCE(
+          (
+            SELECT BTRIM(rm.peran)
+            FROM students s
+            JOIN research_memberships rm
+              ON rm.user_id = s.user_id
+             AND rm.project_id = gsp.project_id
+             AND rm.member_type = 'Mahasiswa'
+            WHERE s.id = gsp.student_id
+              AND LOWER(BTRIM(COALESCE(rm.peran, ''))) NOT IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta')
+            LIMIT 1
+          ),
+          'Web Developer'
+        )
+        WHERE LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta')
+      `).catch(() => {});
+
       await ensureStudentDocumentsTable();
     })();
   }
@@ -225,7 +263,7 @@ function normalizeResearchMembershipInputs(input, fallbackBergabung) {
       ? item.peran ?? item.role ?? item.position ?? item.positionLabel ?? item.position_label
       : null;
     const trimmedPeran = rawPeran != null ? String(rawPeran).trim() : "";
-    const peran = trimmedPeran && trimmedPeran.toLowerCase() !== "alumni" ? trimmedPeran : null;
+    const peran = trimmedPeran && !["alumni", "anggota", "anggota riset", "peserta magang", "mahasiswa", "peserta"].includes(trimmedPeran.toLowerCase()) ? trimmedPeran : null;
 
     const joinedAt = isObject
       ? normalizeOptionalDateField(item.bergabung ?? item.joinedAt ?? item.startDate ?? item.mulai, "Tanggal bergabung riset")
@@ -349,7 +387,7 @@ async function syncStudentResearchMemberships({ userId, studentStatus = null, re
     SELECT selected.project_id,
            $1,
            'Mahasiswa',
-           NULLIF(BTRIM(COALESCE(selected.peran, '')), ''),
+           COALESCE(NULLIF(BTRIM(COALESCE(selected.peran, '')), ''), 'Web Developer'),
            CASE
              WHEN $6::text = 'Alumni' THEN 'Nonaktif'
              WHEN selected.selesai IS NOT NULL AND selected.selesai < CURRENT_DATE THEN 'Nonaktif'
@@ -360,7 +398,11 @@ async function syncStudentResearchMemberships({ userId, studentStatus = null, re
     FROM UNNEST($2::text[], $3::date[], $4::date[], $5::text[]) AS selected(project_id, bergabung, selesai, peran)
     ON CONFLICT (project_id, user_id)
     DO UPDATE SET member_type = EXCLUDED.member_type,
-                  peran = COALESCE(NULLIF(BTRIM(COALESCE(EXCLUDED.peran, '')), ''), research_memberships.peran),
+                  peran = COALESCE(
+                    CASE WHEN LOWER(BTRIM(COALESCE(EXCLUDED.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(EXCLUDED.peran) END,
+                    CASE WHEN LOWER(BTRIM(COALESCE(research_memberships.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(research_memberships.peran) END,
+                    'Web Developer'
+                  ),
                   status = EXCLUDED.status,
                   bergabung = COALESCE(EXCLUDED.bergabung, research_memberships.bergabung),
                   selesai = EXCLUDED.selesai
@@ -387,8 +429,7 @@ async function syncStudentResearchMemberships({ userId, studentStatus = null, re
       AND rm.user_id = $1
       AND rm.project_id = gsp.project_id
       AND rm.member_type = 'Mahasiswa'
-      AND BTRIM(COALESCE(rm.peran, '')) <> ''
-      AND LOWER(BTRIM(rm.peran)) <> 'alumni'
+      AND LOWER(BTRIM(COALESCE(rm.peran, ''))) NOT IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta')
     `,
     [userId]
   ).catch(() => {});
@@ -542,7 +583,10 @@ router.get(
             'projectId', rp.id,
             'title', rp.title,
             'short_title', COALESCE(rp.short_title, rp.title),
-            'peran', CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) = 'alumni' THEN NULL ELSE NULLIF(BTRIM(COALESCE(rm.peran, '')), '') END,
+            'peran', COALESCE(
+              CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm.peran) END,
+              'Web Developer'
+            ),
             'bergabung', TO_CHAR(rm.bergabung, 'YYYY-MM-DD'),
             'selesai', TO_CHAR(rm.selesai, 'YYYY-MM-DD'),
             'status', rm.status
@@ -638,7 +682,10 @@ router.get(
             'projectId', rp.id,
             'title', rp.title,
             'short_title', COALESCE(rp.short_title, rp.title),
-            'peran', CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) = 'alumni' THEN NULL ELSE NULLIF(BTRIM(COALESCE(rm.peran, '')), '') END,
+            'peran', COALESCE(
+              CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm.peran) END,
+              'Web Developer'
+            ),
             'bergabung', TO_CHAR(rm.bergabung, 'YYYY-MM-DD'),
             'selesai', TO_CHAR(rm.selesai, 'YYYY-MM-DD'),
             'status', rm.status

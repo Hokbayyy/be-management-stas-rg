@@ -5,33 +5,40 @@ const {
   buildCertificateData
 } = require("../utils/documentCenterCertificateTemplates");
 
-test("resolveCertificateRole preserves valid position names", () => {
+test("resolveCertificateRole preserves specific position names", () => {
   assert.equal(resolveCertificateRole("Frontend Developer", "Riset"), "Frontend Developer");
   assert.equal(resolveCertificateRole("Machine Learning Engineer", "Magang"), "Machine Learning Engineer");
   assert.equal(resolveCertificateRole("UI/UX Designer", "Riset"), "UI/UX Designer");
   assert.equal(resolveCertificateRole("Embedded System Engineer", "Magang"), "Embedded System Engineer");
-  assert.equal(resolveCertificateRole("Anggota", "Riset"), "Anggota");
+  assert.equal(resolveCertificateRole("Web Developer", "Riset"), "Web Developer");
 });
 
-test("resolveCertificateRole replaces 'Alumni' with appropriate position based on activity type", () => {
-  assert.equal(resolveCertificateRole("Alumni", "Riset"), "Anggota Riset");
-  assert.equal(resolveCertificateRole("alumni", "Riset"), "Anggota Riset");
-  assert.equal(resolveCertificateRole("ALUMNI", "Riset"), "Anggota Riset");
-  assert.equal(resolveCertificateRole("  Alumni  ", "Riset"), "Anggota Riset");
-
-  assert.equal(resolveCertificateRole("Alumni", "Magang"), "Peserta Magang");
-  assert.equal(resolveCertificateRole("alumni", "Magang"), "Peserta Magang");
-  assert.equal(resolveCertificateRole("ALUMNI", "Magang"), "Peserta Magang");
+test("resolveCertificateRole replaces generic roles ('Alumni', 'Anggota', 'Anggota Riset', 'Peserta Magang', 'Mahasiswa', 'Peserta') with specific role 'Web Developer'", () => {
+  for (const genericRole of [
+    "Alumni",
+    "alumni",
+    "ALUMNI",
+    "  Alumni  ",
+    "Anggota",
+    "anggota",
+    "Anggota Riset",
+    "Peserta Magang",
+    "Mahasiswa",
+    "Peserta"
+  ]) {
+    assert.equal(resolveCertificateRole(genericRole, "Riset"), "Web Developer");
+    assert.equal(resolveCertificateRole(genericRole, "Magang"), "Web Developer");
+  }
 });
 
-test("resolveCertificateRole handles null or empty role gracefully", () => {
-  assert.equal(resolveCertificateRole(null, "Riset"), "Anggota Riset");
-  assert.equal(resolveCertificateRole("", "Riset"), "Anggota Riset");
-  assert.equal(resolveCertificateRole(undefined, "Magang"), "Peserta Magang");
-  assert.equal(resolveCertificateRole("   ", "Magang"), "Peserta Magang");
+test("resolveCertificateRole handles null or empty role gracefully with specific role 'Web Developer'", () => {
+  assert.equal(resolveCertificateRole(null, "Riset"), "Web Developer");
+  assert.equal(resolveCertificateRole("", "Riset"), "Web Developer");
+  assert.equal(resolveCertificateRole(undefined, "Magang"), "Web Developer");
+  assert.equal(resolveCertificateRole("   ", "Magang"), "Web Developer");
 });
 
-test("buildCertificateData produces correct projectRole from snapshot", () => {
+test("buildCertificateData produces specific projectRole from snapshot and rejects generic roles", () => {
   const caseRow = {
     student_snapshot: { name: "Budi Santoso" },
     period_snapshot: { startDate: "2026-01-01", endDate: "2026-06-30" },
@@ -51,19 +58,21 @@ test("buildCertificateData produces correct projectRole from snapshot", () => {
   assert.equal(result1.projectTitle, "Smart Monitoring IoT");
   assert.equal(result1.projectRole, "IoT Engineer");
 
-  const projectRowWithAlumniRole = {
-    project_snapshot: {
-      title: "Smart Monitoring IoT",
-      role: "Alumni"
-    },
-    display_order: 0
-  };
+  for (const generic of ["Alumni", "Anggota", "Anggota Riset", "Peserta Magang", "Mahasiswa", "Peserta"]) {
+    const projectRowWithGenericRole = {
+      project_snapshot: {
+        title: "Smart Monitoring IoT",
+        role: generic
+      },
+      display_order: 0
+    };
 
-  const result2 = buildCertificateData(caseRow, projectRowWithAlumniRole);
-  assert.equal(result2.studentName, "Budi Santoso");
-  assert.equal(result2.projectTitle, "Smart Monitoring IoT");
-  assert.equal(result2.projectRole, "Anggota Riset");
-  assert.notEqual(result2.projectRole, "Alumni");
+    const result2 = buildCertificateData(caseRow, projectRowWithGenericRole);
+    assert.equal(result2.studentName, "Budi Santoso");
+    assert.equal(result2.projectTitle, "Smart Monitoring IoT");
+    assert.equal(result2.projectRole, "Web Developer");
+    assert.notEqual(result2.projectRole, generic);
+  }
 });
 
 test("documentCenter utilities do not reference non-existent legacy_membership_id column", async () => {
@@ -80,19 +89,25 @@ test("documentCenter utilities do not reference non-existent legacy_membership_i
   }
 });
 
-test("modified backend modules load cleanly and prioritize research_memberships.peran", () => {
+test("modified backend modules load cleanly and prioritize specific research_memberships.peran", () => {
   const finalActivity = require("../utils/documentCenterFinalActivity");
   const lookups = require("../utils/documentCenterLookups");
+  const draftUpload = require("../utils/documentCenterDraftUpload");
   const studentsRouter = require("../routes/api/students");
   const certificatesRouter = require("../routes/api/certificates");
   const graduationRouter = require("../routes/api/graduationSubmissions");
+  const documentCenterRouter = require("../routes/api/documentCenter");
 
   assert.equal(typeof finalActivity.healStudentFinalActivityCases, "function");
   assert.equal(typeof finalActivity.healCaseAlumniRoleByCaseId, "function");
+  assert.equal(typeof finalActivity.healCaseAlumniRoleByDocumentId, "function");
   assert.equal(typeof lookups.listStudentProjects, "function");
+  assert.ok(draftUpload);
   assert.ok(studentsRouter);
   assert.ok(certificatesRouter);
   assert.ok(graduationRouter);
+  assert.ok(documentCenterRouter);
 });
+
 
 

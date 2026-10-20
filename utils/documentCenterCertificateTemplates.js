@@ -408,10 +408,13 @@ function wrapRichSegments(segments, fonts, size, maxWidth) {
   }).filter((line) => line.length);
 }
 
-function resolveCertificateRole(role, activityType) {
+function resolveCertificateRole(role) {
   const normalized = String(role || "").trim();
-  if (!normalized || normalized.toLowerCase() === "alumni") {
-    return activityType === "Riset" ? "Anggota Riset" : "Peserta Magang";
+  if (
+    !normalized ||
+    ["alumni", "anggota", "anggota riset", "peserta magang", "mahasiswa", "peserta"].includes(normalized.toLowerCase())
+  ) {
+    return "Web Developer";
   }
   return normalized;
 }
@@ -486,7 +489,7 @@ async function renderCertificatePdf({ backgroundBytes, templateKey, data, docume
     const compactData = {
       ...data,
       projectTitle: String(data.projectTitle || "proyek/kegiatan").slice(0, 80),
-      projectRole: String(data.projectRole || (data.activityType === "Riset" ? "anggota riset" : "peserta magang")).slice(0, 40),
+      projectRole: resolveCertificateRole(data.projectRole, data.activityType).slice(0, 40),
       periodLabel: String(data.periodLabel || "-").slice(0, 60)
     };
     lines = wrapRichSegments(buildParagraphSegments(compactData), fonts, paragraphSize, paragraph.width).slice(0, paragraph.maxLines);
@@ -556,7 +559,7 @@ async function previewTemplate({ id, body }) {
         activityType: version.activity_type,
         periodLabel: "1 Januari 2026 sampai 30 Juni 2026",
         projectTitle: "Judul Proyek Contoh",
-        projectRole: version.activity_type === "Riset" ? "anggota riset" : "peserta magang"
+        projectRole: "Web Developer"
       },
       documentNumber: "13.001/STASRG/I/2026",
       issuedAt: new Date("2026-01-15T00:00:00Z")
@@ -645,16 +648,13 @@ async function generateCertificateDraft({ id, authUser, ip }) {
                FROM graduation_submission_projects gsp
                WHERE gsp.student_id = c.legacy_student_id
                  AND gsp.project_id = cp.legacy_project_id
-                 AND BTRIM(COALESCE(gsp.position_label, '')) <> ''
-                 AND LOWER(BTRIM(gsp.position_label)) <> 'alumni'
+                 AND LOWER(BTRIM(COALESCE(gsp.position_label, ''))) NOT IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta')
                LIMIT 1
              ) AS graduation_position_label,
              (
                SELECT COALESCE(
-                 CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm.peran) END,
-                 CASE WHEN LOWER(BTRIM(COALESCE(rm_primary.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm_primary.peran) END,
-                 CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm.peran) END,
-                 CASE WHEN LOWER(BTRIM(COALESCE(rm_primary.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm_primary.peran) END
+                 CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm.peran) END,
+                 CASE WHEN LOWER(BTRIM(COALESCE(rm_primary.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm_primary.peran) END
                )
                FROM students s
                LEFT JOIN research_memberships rm
@@ -686,11 +686,7 @@ async function generateCertificateDraft({ id, authUser, ip }) {
     }
     const isGenericRole = (val) => {
       const n = typeof val === "string" ? val.trim().toLowerCase() : "";
-      return !n || ["alumni", "anggota", "anggota riset", "peserta magang", "mahasiswa"].includes(n);
-    };
-    const isNonAlumniRole = (val) => {
-      const n = typeof val === "string" ? val.trim().toLowerCase() : "";
-      return Boolean(n) && n !== "alumni";
+      return !n || ["alumni", "anggota", "anggota riset", "peserta magang", "mahasiswa", "peserta"].includes(n);
     };
     const resolvedRole = !isGenericRole(row.project_snapshot?.role)
       ? String(row.project_snapshot.role).trim()
@@ -698,13 +694,7 @@ async function generateCertificateDraft({ id, authUser, ip }) {
         ? String(row.rm_peran).trim()
         : !isGenericRole(row.graduation_position_label)
           ? String(row.graduation_position_label).trim()
-          : isNonAlumniRole(row.project_snapshot?.role)
-            ? String(row.project_snapshot.role).trim()
-            : isNonAlumniRole(row.rm_peran)
-              ? String(row.rm_peran).trim()
-              : isNonAlumniRole(row.graduation_position_label)
-                ? String(row.graduation_position_label).trim()
-                : (row.activity_type === "Riset" ? "Anggota Riset" : "Peserta Magang");
+          : "Web Developer";
     if (row.project_snapshot?.role !== resolvedRole) {
       row.project_snapshot = { ...(row.project_snapshot || {}), role: resolvedRole };
       await client.query(
@@ -789,7 +779,7 @@ async function generateCertificateDraft({ id, authUser, ip }) {
         prodi_snapshot, university_snapshot, project_name_snapshot,
         period_snapshot, participant_role, display_order
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'Peserta',0)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,0)
       `,
       [
         `DCPART-${crypto.randomUUID()}`, documentId, row.student_key || buildStudentKey(row.legacy_student_id),
@@ -799,7 +789,8 @@ async function generateCertificateDraft({ id, authUser, ip }) {
         row.student_snapshot?.prodi || "-",
         row.student_snapshot?.university || CONTENT_CONFIG.universityName || "-",
         row.project_snapshot?.title || row.project_snapshot?.name || row.legacy_project_id || "Project belum diisi",
-        row.period_snapshot
+        row.period_snapshot,
+        resolvedRole
       ]
     );
     await client.query("UPDATE dc_final_activity_case_projects SET certificate_document_id=$2, certificate_status='draft_created', updated_at=NOW() WHERE id=$1", [caseProjectId, documentId]);

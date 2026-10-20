@@ -354,14 +354,14 @@ function buildProjectSummary(projectSnapshots) {
     return {
       title: "Project belum diisi",
       titles: ["Project belum diisi"],
-      role: "peserta magang",
-      roles: ["peserta magang"]
+      role: "Web Developer",
+      roles: ["Web Developer"]
     };
   }
   const titles = normalized.map(projectTitleFromSnapshot);
   const roles = normalized
     .map((snapshot) => optionalSafeText(snapshot?.role || snapshot?.position))
-    .filter((r) => r && r.toLowerCase() !== "alumni");
+    .filter((r) => r && !["alumni", "anggota", "anggota riset", "peserta magang", "mahasiswa", "peserta"].includes(r.toLowerCase()));
   const uniqueRoles = [...new Set(roles)];
   return {
     title: titles.join(", "),
@@ -413,7 +413,8 @@ function buildLetterData({ studentSnapshot, periodSnapshot, projectSnapshot, pro
 }
 
 function buildActivityParagraph(data) {
-  const role = data.projectRole && String(data.projectRole).trim().toLowerCase() !== "alumni" ? data.projectRole : null;
+  const rawRole = data.projectRole ? String(data.projectRole).trim() : "";
+  const role = rawRole && !["alumni", "anggota", "anggota riset", "peserta magang", "mahasiswa", "peserta"].includes(rawRole.toLowerCase()) ? rawRole : null;
   const roleText = role ? ` dengan peran sebagai ${role}` : "";
   if (data.activityType === "Riset") {
     return `Yang bersangkutan telah menyelesaikan kegiatan riset di ${safeFallbackText(data.organizationLabel || CONTENT_CONFIG.organizationLabel, "CoE STAS-RG")} sebagai bagian dari proyek "${safeFallbackText(data.projectTitle, "Project belum diisi")}"${roleText}, terhitung sejak ${formatDateId(`${data.periodStart}T00:00:00Z`)} sampai dengan ${formatDateId(`${data.periodEnd}T00:00:00Z`)}.`;
@@ -588,12 +589,9 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
               COALESCE(
                 (
                   SELECT COALESCE(
-                    CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm.peran) END,
-                    CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(gsp.position_label) END,
-                    CASE WHEN LOWER(BTRIM(COALESCE(rm_primary.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa') THEN NULL ELSE BTRIM(rm_primary.peran) END,
-                    CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm.peran) END,
-                    CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(gsp.position_label) END,
-                    CASE WHEN LOWER(BTRIM(COALESCE(rm_primary.peran, ''))) IN ('', 'alumni') THEN NULL ELSE BTRIM(rm_primary.peran) END
+                    CASE WHEN LOWER(BTRIM(COALESCE(rm.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm.peran) END,
+                    CASE WHEN LOWER(BTRIM(COALESCE(gsp.position_label, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(gsp.position_label) END,
+                    CASE WHEN LOWER(BTRIM(COALESCE(rm_primary.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(rm_primary.peran) END
                   )
                   FROM students s
                   LEFT JOIN graduation_submission_projects gsp
@@ -614,18 +612,18 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
                   WHERE s.id = $2
                   LIMIT 1
                 ),
-                CASE WHEN $3 = 'Riset' THEN 'Anggota Riset' ELSE 'Peserta Magang' END
+                'Web Developer'
               ) AS resolved_project_role
        FROM dc_final_activity_case_projects cp
        WHERE cp.final_activity_case_id = $1
        ORDER BY cp.display_order, cp.id
        FOR SHARE`,
-      [caseId, caseRow.legacy_student_id, caseRow.activity_type]
+      [caseId, caseRow.legacy_student_id]
     );
     if (projectResult.rowCount < 1) throw httpError(409, "Surat hanya dapat dibuat untuk case yang memiliki project.");
     const isGenericRole = (val) => {
       const n = typeof val === "string" ? val.trim().toLowerCase() : "";
-      return !n || ["alumni", "anggota", "anggota riset", "peserta magang", "mahasiswa"].includes(n);
+      return !n || ["alumni", "anggota", "anggota riset", "peserta magang", "mahasiswa", "peserta"].includes(n);
     };
     const projectRows = [];
     for (const row of projectResult.rows) {
@@ -633,7 +631,7 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
       const resolvedRole = typeof row.resolved_project_role === "string" ? row.resolved_project_role.trim() : "";
       if (
         resolvedRole &&
-        (!snapshotRole || snapshotRole.toLowerCase() === "alumni" || (isGenericRole(snapshotRole) && !isGenericRole(resolvedRole)))
+        (!snapshotRole || isGenericRole(snapshotRole))
       ) {
         const nextSnapshot = { ...(row.project_snapshot || {}), role: resolvedRole };
         await client.query(
@@ -732,14 +730,15 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
          legacy_period_key, project_key, name_snapshot, nim_snapshot,
          prodi_snapshot, university_snapshot, project_name_snapshot,
          period_snapshot, participant_role, display_order
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'Mahasiswa',0)`,
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,0)`,
       [
         `DCPART-${crypto.randomUUID()}`, documentId,
         caseRow.student_key || buildStudentKey(caseRow.legacy_student_id),
         caseRow.legacy_student_id, primaryProjectRow.legacy_project_id,
         caseRow.period_key, primaryProjectRow.project_key,
         data.studentName, data.studentNim, data.studyProgram,
-        data.universityName, data.projectTitle, formatPeriodLabel(caseRow.period_snapshot)
+        data.universityName, data.projectTitle, formatPeriodLabel(caseRow.period_snapshot),
+        data.projectRole || primaryProjectRow.project_snapshot?.role || "Web Developer"
       ]
     );
     const linked = await client.query(
