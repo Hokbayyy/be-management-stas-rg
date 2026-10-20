@@ -19,7 +19,8 @@ const {
 const {
   pickBestResolvedRole,
   buildResolvedProjectRoleSql,
-  inferRoleFromProjectTitle
+  inferRoleFromProjectTitle,
+  isGenericOrAlumniRole
 } = require("./studentResearchRoleResolver");
 
 const TEMPLATE_KEY = "completion_letter_completed_internship";
@@ -602,6 +603,47 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
     }
     const projectResult = await client.query(
       `SELECT cp.*,
+              (
+                SELECT BTRIM(rm.peran)
+                FROM students s
+                JOIN research_memberships rm
+                  ON rm.user_id = s.user_id
+                 AND (rm.project_id = cp.legacy_project_id OR cp.legacy_project_id IS NULL)
+                 AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'
+                 AND NULLIF(BTRIM(rm.peran), '') IS NOT NULL
+                WHERE s.id = $2
+                ORDER BY CASE WHEN rm.project_id = cp.legacy_project_id THEN 0 ELSE 1 END, rm.id ASC
+                LIMIT 1
+              ) AS datamahasiswa_peran,
+              (
+                SELECT BTRIM(rd.name)
+                FROM students s
+                JOIN research_memberships rm
+                  ON rm.user_id = s.user_id
+                 AND (rm.project_id = cp.legacy_project_id OR cp.legacy_project_id IS NULL)
+                 AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'
+                JOIN research_divisions rd ON rd.id = rm.division_id
+                WHERE s.id = $2
+                  AND NULLIF(BTRIM(rd.name), '') IS NOT NULL
+                ORDER BY CASE WHEN rm.project_id = cp.legacy_project_id THEN 0 ELSE 1 END, rm.id ASC
+                LIMIT 1
+              ) AS datamahasiswa_division,
+              (
+                SELECT COALESCE(rp.title, rp_primary.title)
+                FROM students s
+                LEFT JOIN research_projects rp ON rp.id = cp.legacy_project_id
+                LEFT JOIN LATERAL (
+                  SELECT rp_f.title
+                  FROM research_memberships rm_f
+                  JOIN research_projects rp_f ON rp_f.id = rm_f.project_id
+                  WHERE rm_f.user_id = s.user_id
+                    AND LOWER(COALESCE(rm_f.member_type, 'mahasiswa')) = 'mahasiswa'
+                  ORDER BY rm_f.id ASC
+                  LIMIT 1
+                ) rp_primary ON TRUE
+                WHERE s.id = $2
+                LIMIT 1
+              ) AS resolved_project_title,
               COALESCE(
                 (
                   SELECT ${buildResolvedProjectRoleSql({
@@ -625,15 +667,36 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
     const projectRows = [];
     for (const row of projectResult.rows) {
       let snapshotRole = typeof row.project_snapshot?.role === "string" ? row.project_snapshot.role.trim() : "";
+      const dmRole = typeof row.datamahasiswa_peran === "string" ? row.datamahasiswa_peran.trim() : "";
+      const dmDiv = typeof row.datamahasiswa_division === "string" ? row.datamahasiswa_division.trim() : "";
       const resolvedRole = typeof row.resolved_project_role === "string" ? row.resolved_project_role.trim() : "";
-      const projectTitle = row.project_snapshot?.title || row.project_snapshot?.shortTitle || "";
-      const inferredRole = inferRoleFromProjectTitle(projectTitle);
+      const projectTitle = row.resolved_project_title || row.project_snapshot?.title || row.project_snapshot?.shortTitle || "";
+      const inferredRole = inferRoleFromProjectTitle(projectTitle, dmDiv);
       if (snapshotRole.toLowerCase() === "web developer" && inferredRole && inferredRole.toLowerCase() !== "web developer") {
         snapshotRole = inferredRole;
       }
-      const targetRole = pickBestResolvedRole(resolvedRole, snapshotRole);
-      if (targetRole && (row.project_snapshot?.role !== targetRole)) {
-        const nextSnapshot = { ...(row.project_snapshot || {}), role: targetRole };
+      let targetRole = "";
+      if (dmRole && !isGenericOrAlumniRole(dmRole)) {
+        targetRole = (dmRole.toLowerCase() === "web developer" && inferredRole && inferredRole.toLowerCase() !== "web developer")
+          ? inferredRole
+          : dmRole;
+      } else if (dmDiv && !isGenericOrAlumniRole(dmDiv)) {
+        targetRole = dmDiv;
+      } else {
+        const candidate = pickBestResolvedRole(resolvedRole, snapshotRole);
+        targetRole = (candidate.toLowerCase() === "web developer" && inferredRole && inferredRole.toLowerCase() !== "web developer")
+          ? inferredRole
+          : (candidate || inferredRole || (caseRow.activity_type === "Riset" ? "Peneliti" : "Web Developer"));
+      }
+      const titleToSave = row.resolved_project_title || row.project_snapshot?.title || null;
+      const shouldUpdateRole = Boolean(targetRole) && row.project_snapshot?.role !== targetRole;
+      const shouldUpdateTitle = Boolean(titleToSave) && row.project_snapshot?.title !== titleToSave;
+      if (shouldUpdateRole || shouldUpdateTitle) {
+        const nextSnapshot = {
+          ...(row.project_snapshot || {}),
+          ...(shouldUpdateRole ? { role: targetRole } : {}),
+          ...(shouldUpdateTitle ? { title: titleToSave } : {})
+        };
         await client.query(
           "UPDATE dc_final_activity_case_projects SET project_snapshot = $2::jsonb, updated_at = NOW() WHERE id = $1",
           [row.id, JSON.stringify(nextSnapshot)]
@@ -784,7 +847,7 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
 
 async function renderPublishedCompletionLetterVersion({ client, document, documentNumber, issuedAt }) {
   const snapshot = document.version_snapshot_data || {};
-  const letterData = snapshot.letterData || buildLetterData({
+  const letterData = buildLetterData({
     studentSnapshot: snapshot.student,
     periodSnapshot: snapshot.period,
     projectSnapshot: snapshot.project,

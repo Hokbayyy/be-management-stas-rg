@@ -17,6 +17,7 @@ const {
   openPrivateTemplateVersion
 } = require("./documentCenterStorage");
 const {
+  isGenericOrAlumniRole,
   SQL_GENERIC_ROLES_LIST,
   pickBestResolvedRole,
   buildResolvedProjectRoleSql,
@@ -662,9 +663,10 @@ async function generateCertificateDraft({ id, authUser, ip }) {
                FROM students s
                JOIN research_memberships rm
                  ON rm.user_id = s.user_id
-                AND rm.project_id = cp.legacy_project_id
-                AND rm.member_type = 'Mahasiswa'
+                AND (rm.project_id = cp.legacy_project_id OR cp.legacy_project_id IS NULL)
+                AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'
                WHERE s.id = c.legacy_student_id
+               ORDER BY CASE WHEN rm.project_id = cp.legacy_project_id THEN 0 ELSE 1 END, rm.id ASC
                LIMIT 1
              ) AS datamahasiswa_peran,
              (
@@ -672,12 +674,29 @@ async function generateCertificateDraft({ id, authUser, ip }) {
                FROM students s
                JOIN research_memberships rm
                  ON rm.user_id = s.user_id
-                AND rm.project_id = cp.legacy_project_id
-                AND rm.member_type = 'Mahasiswa'
+                AND (rm.project_id = cp.legacy_project_id OR cp.legacy_project_id IS NULL)
+                AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'
                LEFT JOIN research_divisions rd ON rd.id = rm.division_id
                WHERE s.id = c.legacy_student_id
+               ORDER BY CASE WHEN rm.project_id = cp.legacy_project_id THEN 0 ELSE 1 END, rm.id ASC
                LIMIT 1
              ) AS datamahasiswa_division,
+             (
+               SELECT COALESCE(rp.title, rp_primary.title)
+               FROM students s
+               LEFT JOIN research_projects rp ON rp.id = cp.legacy_project_id
+               LEFT JOIN LATERAL (
+                 SELECT rp_f.title
+                 FROM research_memberships rm_f
+                 JOIN research_projects rp_f ON rp_f.id = rm_f.project_id
+                 WHERE rm_f.user_id = s.user_id
+                   AND LOWER(COALESCE(rm_f.member_type, 'mahasiswa')) = 'mahasiswa'
+                 ORDER BY rm_f.id ASC
+                 LIMIT 1
+               ) rp_primary ON TRUE
+               WHERE s.id = c.legacy_student_id
+               LIMIT 1
+             ) AS resolved_project_title,
              (
                SELECT BTRIM(gsp.position_label)
                FROM graduation_submission_projects gsp
@@ -708,10 +727,11 @@ async function generateCertificateDraft({ id, authUser, ip }) {
     if (row.outcome !== "completed" || !["Magang", "Riset"].includes(row.activity_type) || row.certificate_required !== true || row.certificate_status !== "pending" || row.certificate_document_id || row.case_status === "revoked") {
       throw httpError(409, "Sertifikat tidak dapat dibuatkan draft generator.");
     }
-    const projectTitle = row.project_snapshot?.title || row.project_snapshot?.shortTitle || "";
-    const inferredRole = inferRoleFromProjectTitle(projectTitle);
-    const dmRole = typeof row.datamahasiswa_peran === "string" ? row.datamahasiswa_peran.trim() : "";
+    const resolvedTitle = row.resolved_project_title || "";
+    const projectTitle = resolvedTitle || row.project_snapshot?.title || row.project_snapshot?.shortTitle || "";
     const dmDiv = typeof row.datamahasiswa_division === "string" ? row.datamahasiswa_division.trim() : "";
+    const inferredRole = inferRoleFromProjectTitle(projectTitle, dmDiv);
+    const dmRole = typeof row.datamahasiswa_peran === "string" ? row.datamahasiswa_peran.trim() : "";
     let snapshotRole = typeof row.project_snapshot?.role === "string" ? row.project_snapshot.role.trim() : "";
 
     let resolvedRole = null;
@@ -739,8 +759,14 @@ async function generateCertificateDraft({ id, authUser, ip }) {
       resolvedRole = row.activity_type === "Riset" ? "Peneliti" : "Web Developer";
     }
 
-    if (row.project_snapshot?.role !== resolvedRole) {
-      row.project_snapshot = { ...(row.project_snapshot || {}), role: resolvedRole };
+    const shouldUpdateRole = Boolean(resolvedRole) && row.project_snapshot?.role !== resolvedRole;
+    const shouldUpdateTitle = Boolean(resolvedTitle) && row.project_snapshot?.title !== resolvedTitle;
+    if (shouldUpdateRole || shouldUpdateTitle) {
+      row.project_snapshot = {
+        ...(row.project_snapshot || {}),
+        ...(shouldUpdateRole ? { role: resolvedRole } : {}),
+        ...(shouldUpdateTitle ? { title: resolvedTitle } : {})
+      };
       await client.query(
         "UPDATE dc_final_activity_case_projects SET project_snapshot=$2::jsonb, updated_at=NOW() WHERE id=$1",
         [row.id, JSON.stringify(row.project_snapshot)]
@@ -921,12 +947,13 @@ async function renderPublishedCertificateVersion({ client, document, documentNum
   try {
     const rawCertData = snapshot.certificateData || {};
     const effectiveActivityType = rawCertData.activityType || (template.activity_type || "Riset");
-    const certProjectTitle = rawCertData.projectTitle || snapshot.project?.title || "";
+    const certProjectTitle = snapshot.project?.title || rawCertData.projectTitle || "";
+    const candidateRole = snapshot.project?.role || rawCertData.projectRole;
     const certData = {
       ...rawCertData,
       activityType: effectiveActivityType,
       projectTitle: certProjectTitle,
-      projectRole: resolveCertificateRole(rawCertData.projectRole || snapshot.project?.role, effectiveActivityType, certProjectTitle)
+      projectRole: resolveCertificateRole(candidateRole, effectiveActivityType, certProjectTitle)
     };
     const pdfBuffer = await renderCertificatePdf({
       backgroundBytes: opened.bytes,

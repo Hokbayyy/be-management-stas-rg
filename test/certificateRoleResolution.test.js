@@ -318,5 +318,64 @@ test("Certificate generation prioritizes role assigned in Data Mahasiswa on rese
   assert.notEqual(cert5.projectRole, "Web Developer");
 });
 
+test("documentCenterCertificateTemplates has isGenericOrAlumniRole properly imported and accessible", async () => {
+  const fs = require("node:fs/promises");
+  const path = require("node:path");
+  const content = await fs.readFile(path.join(__dirname, "../utils/documentCenterCertificateTemplates.js"), "utf8");
+  assert.ok(content.includes("isGenericOrAlumniRole"), "documentCenterCertificateTemplates.js must import isGenericOrAlumniRole");
+  const certModule = require("../utils/documentCenterCertificateTemplates");
+  assert.ok(certModule.generateCertificateDraft, "generateCertificateDraft must be defined");
+});
+
+test("Certificate published version prioritizes updated snapshot.project role over stale rawCertData", () => {
+  const { resolveCertificateRole } = require("../utils/documentCenterCertificateTemplates");
+  const rawCertData = {
+    projectTitle: "Creative and Social Media",
+    projectRole: "Web Developer",
+    activityType: "Magang"
+  };
+  const snapshot = {
+    project: {
+      title: "Creative and Social Media",
+      role: "Creative Content"
+    }
+  };
+
+  const certProjectTitle = snapshot.project?.title || rawCertData.projectTitle || "";
+  const candidateRole = snapshot.project?.role || rawCertData.projectRole;
+  const resolved = resolveCertificateRole(candidateRole, rawCertData.activityType, certProjectTitle);
+
+  assert.equal(resolved, "Creative Content", "Updated role from Database Mahasiswa snapshot must override stale Web Developer");
+});
+
+test("Completion Letter buildLetterData never outputs Web Developer for non-web projects even if snapshot had Web Developer", () => {
+  const { buildLetterData } = require("../utils/documentCenterCompletionLetterTemplates");
+  const studentSnapshot = { name: "Ahmad Dahlan", nim: "1202200001", prodi: "S1 Sistem Informasi" };
+  const periodSnapshot = { startDate: "2026-10-05", endDate: "2026-10-05" };
+  const projectSnapshot = {
+    title: "Creative and Social Media",
+    role: "Web Developer"
+  };
+
+  const letterData = buildLetterData({
+    studentSnapshot,
+    periodSnapshot,
+    projectSnapshot,
+    projectSnapshots: [projectSnapshot],
+    activityType: "Magang"
+  });
+
+  assert.equal(letterData.projectRole, "Creative Content");
+  assert.ok(
+    letterData.activityParagraph.includes('Creative Content'),
+    "Activity paragraph must reflect Creative Content"
+  );
+  assert.ok(
+    !letterData.activityParagraph.includes('dengan peran sebagai Web Developer'),
+    "Activity paragraph must NOT contain Web Developer for Creative and Social Media"
+  );
+});
+
+
 
 

@@ -305,7 +305,7 @@ async function loadEligibleContext(client, { studentId, periodId }) {
       JOIN graduation_submissions gs ON gs.student_id = ps.id
       JOIN research_memberships rm
         ON rm.user_id = ps.user_id
-       AND rm.member_type = 'Mahasiswa'
+       AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'
       JOIN research_projects rp ON rp.id = rm.project_id
       LEFT JOIN graduation_submission_projects gsp
         ON gsp.student_id = ps.id
@@ -367,7 +367,7 @@ async function loadEligibleProjects(client, studentId) {
     FROM students s
     JOIN research_memberships rm
       ON rm.user_id = s.user_id
-     AND rm.member_type = 'Mahasiswa'
+     AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'
     LEFT JOIN research_divisions rd
       ON rd.id = rm.division_id
     JOIN research_projects rp ON rp.id = rm.project_id
@@ -892,7 +892,7 @@ async function listEligible(rawQuery) {
           ON gsp.student_id = s.id
          AND gsp.project_id = rm.project_id
         WHERE rm.user_id = s.user_id
-          AND rm.member_type = 'Mahasiswa'
+          AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'
       ) pp ON TRUE
       WHERE ${predicates.join(" AND ")}
         AND (sp.id IS NOT NULL OR pp.project_start_date IS NOT NULL OR pp.project_end_date IS NOT NULL OR s.bergabung IS NOT NULL OR gs.graduation_completed_at IS NOT NULL)
@@ -925,7 +925,7 @@ async function listEligible(rawQuery) {
         'completedAt', TO_CHAR(rm.selesai, 'YYYY-MM-DD')
       ) ORDER BY rm.id ASC, COALESCE(rp.short_title, rp.title), rp.id) AS items
       FROM students ps
-      JOIN research_memberships rm ON rm.user_id = ps.user_id AND rm.member_type = 'Mahasiswa'
+      JOIN research_memberships rm ON rm.user_id = ps.user_id AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'
       JOIN research_projects rp ON rp.id = rm.project_id
       LEFT JOIN graduation_submission_projects gsp ON gsp.student_id = ps.id AND gsp.project_id = rm.project_id
       WHERE ps.id = f.student_id
@@ -1039,9 +1039,9 @@ async function createOneCase({ item, authUser, ip, allowProjectPeriodFallback = 
          LIMIT 1`,
         [studentKey, COMPLETION_DEFINITION_ID, context.period_activity_type, periodKey]
       );
-      await client.query("ROLLBACK");
       const existingCase = existing.rows[0] || null;
       if (["issued", "revoked"].includes(existingCase?.case_status)) {
+        await client.query("ROLLBACK");
         return {
           studentId,
           periodId,
@@ -1053,7 +1053,55 @@ async function createOneCase({ item, authUser, ip, allowProjectPeriodFallback = 
             : "Dokumen kandidat sudah dicabut dan tidak boleh diterbitkan ulang melalui batch baru."
         };
       }
-      return { studentId, periodId, status: "existing", caseId: existingCase?.id || null, caseStatus: existingCase?.case_status || null };
+      if (existingCase?.id) {
+        await client.query(
+          `UPDATE dc_final_activity_cases
+           SET student_snapshot = $2::jsonb,
+               period_snapshot = $3::jsonb,
+               completed_at = $4::date,
+               updated_at = NOW()
+           WHERE id = $1`,
+          [
+            existingCase.id,
+            JSON.stringify(buildStudentSnapshot(context)),
+            JSON.stringify(buildPeriodSnapshot(context)),
+            completedAt
+          ]
+        );
+        for (let index = 0; index < orderedProjects.length; index += 1) {
+          const project = orderedProjects[index];
+          await client.query(
+            `
+            INSERT INTO dc_final_activity_case_projects (
+              id, final_activity_case_id, student_key, project_key, legacy_project_id,
+              project_snapshot, certificate_required, certificate_document_definition_id,
+              certificate_status, display_order
+            )
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, TRUE, $7, 'pending', $8)
+            ON CONFLICT (final_activity_case_id, project_key)
+            DO UPDATE SET
+              legacy_project_id = EXCLUDED.legacy_project_id,
+              project_snapshot = EXCLUDED.project_snapshot,
+              display_order = EXCLUDED.display_order,
+              updated_at = NOW()
+            `,
+            [
+              `DCFCPROJ-${crypto.randomUUID()}`,
+              existingCase.id,
+              studentKey,
+              `project:${project.project_id}`,
+              project.project_id,
+              JSON.stringify(buildProjectSnapshot(project)),
+              certificateDefinition.id,
+              index
+            ]
+          );
+        }
+        await client.query("COMMIT");
+        return { studentId, periodId, status: "existing", caseId: existingCase.id, caseStatus: existingCase.case_status };
+      }
+      await client.query("ROLLBACK");
+      return { studentId, periodId, status: "existing", caseId: null, caseStatus: null };
     }
     for (let index = 0; index < orderedProjects.length; index += 1) {
       const project = orderedProjects[index];
@@ -1065,7 +1113,12 @@ async function createOneCase({ item, authUser, ip, allowProjectPeriodFallback = 
           certificate_status, display_order
         )
         VALUES ($1, $2, $3, $4, $5, $6::jsonb, TRUE, $7, 'pending', $8)
-        ON CONFLICT (final_activity_case_id, project_key) DO NOTHING
+        ON CONFLICT (final_activity_case_id, project_key)
+        DO UPDATE SET
+          legacy_project_id = EXCLUDED.legacy_project_id,
+          project_snapshot = EXCLUDED.project_snapshot,
+          display_order = EXCLUDED.display_order,
+          updated_at = NOW()
         `,
         [
           `DCFCPROJ-${crypto.randomUUID()}`,
@@ -1541,7 +1594,7 @@ async function queryCaseProjectsWithResolvedRole(caseId) {
              JOIN research_memberships rm
                ON rm.user_id = s.user_id
               AND (rm.project_id = cp.legacy_project_id OR cp.legacy_project_id IS NULL)
-              AND rm.member_type = 'Mahasiswa'
+              AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'
               AND NULLIF(BTRIM(rm.peran), '') IS NOT NULL
              WHERE c.id = cp.final_activity_case_id
              ORDER BY CASE WHEN rm.project_id = cp.legacy_project_id THEN 0 ELSE 1 END, rm.id ASC
@@ -1554,7 +1607,7 @@ async function queryCaseProjectsWithResolvedRole(caseId) {
              JOIN research_memberships rm
                ON rm.user_id = s.user_id
               AND (rm.project_id = cp.legacy_project_id OR cp.legacy_project_id IS NULL)
-              AND rm.member_type = 'Mahasiswa'
+              AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'
              JOIN research_divisions rd ON rd.id = rm.division_id
              WHERE c.id = cp.final_activity_case_id
                AND NULLIF(BTRIM(rd.name), '') IS NOT NULL
@@ -1585,7 +1638,7 @@ async function queryCaseProjectsWithResolvedRole(caseId) {
                FROM research_memberships rm_f
                JOIN research_projects rp_f ON rp_f.id = rm_f.project_id
                WHERE rm_f.user_id = s.user_id
-                 AND rm_f.member_type = 'Mahasiswa'
+                 AND LOWER(COALESCE(rm_f.member_type, 'mahasiswa')) = 'mahasiswa'
                ORDER BY rm_f.id ASC
                LIMIT 1
              ) rp_primary ON TRUE
@@ -1602,7 +1655,7 @@ async function queryCaseProjectsWithResolvedRole(caseId) {
                FROM research_memberships rm_f
                JOIN research_projects rp_f ON rp_f.id = rm_f.project_id
                WHERE rm_f.user_id = s.user_id
-                 AND rm_f.member_type = 'Mahasiswa'
+                 AND LOWER(COALESCE(rm_f.member_type, 'mahasiswa')) = 'mahasiswa'
                ORDER BY rm_f.id ASC
                LIMIT 1
              ) rp_primary ON TRUE
@@ -2207,6 +2260,44 @@ async function healCaseAlumniRoleByCaseId(caseId, { forceSyncFromStudent = false
       return false;
     }
     const caseRow = caseResult.rows[0];
+
+    if (forceSyncFromStudent && caseRow.legacy_student_id && caseRow.case_status !== "issued" && caseRow.case_status !== "revoked") {
+      const eligibleProjects = await loadEligibleProjects(client, caseRow.legacy_student_id);
+      if (eligibleProjects.length > 0) {
+        const studentKey = caseRow.student_key || buildStudentKey(caseRow.legacy_student_id);
+        const certDef = await requireActiveDefinition(client, CERTIFICATE_DEFINITION_ID, "certificate", "system_generated").catch(() => null);
+        for (let index = 0; index < eligibleProjects.length; index += 1) {
+          const project = eligibleProjects[index];
+          await client.query(
+            `
+            INSERT INTO dc_final_activity_case_projects (
+              id, final_activity_case_id, student_key, project_key, legacy_project_id,
+              project_snapshot, certificate_required, certificate_document_definition_id,
+              certificate_status, display_order
+            )
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, TRUE, $7, 'pending', $8)
+            ON CONFLICT (final_activity_case_id, project_key)
+            DO UPDATE SET
+              legacy_project_id = EXCLUDED.legacy_project_id,
+              project_snapshot = EXCLUDED.project_snapshot,
+              display_order = EXCLUDED.display_order,
+              updated_at = NOW()
+            `,
+            [
+              `DCFCPROJ-${crypto.randomUUID()}`,
+              caseId,
+              studentKey,
+              `project:${project.project_id}`,
+              project.project_id,
+              JSON.stringify(buildProjectSnapshot(project)),
+              certDef?.id || CERTIFICATE_DEFINITION_ID,
+              index
+            ]
+          );
+        }
+      }
+    }
+
     const projectResult = await client.query(
       `SELECT cp.*,
               (
@@ -2215,7 +2306,7 @@ async function healCaseAlumniRoleByCaseId(caseId, { forceSyncFromStudent = false
                 JOIN research_memberships rm ON rm.user_id = s.user_id
                 WHERE s.id = $2
                   AND (rm.project_id = cp.legacy_project_id OR cp.legacy_project_id IS NULL)
-                  AND rm.member_type = 'Mahasiswa'
+                  AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'
                   AND NULLIF(BTRIM(rm.peran), '') IS NOT NULL
                 ORDER BY CASE WHEN rm.project_id = cp.legacy_project_id THEN 0 ELSE 1 END, rm.id ASC
                 LIMIT 1
@@ -2227,7 +2318,7 @@ async function healCaseAlumniRoleByCaseId(caseId, { forceSyncFromStudent = false
                 JOIN research_divisions rd ON rd.id = rm.division_id
                 WHERE s.id = $2
                   AND (rm.project_id = cp.legacy_project_id OR cp.legacy_project_id IS NULL)
-                  AND rm.member_type = 'Mahasiswa'
+                  AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'
                   AND NULLIF(BTRIM(rd.name), '') IS NOT NULL
                 ORDER BY CASE WHEN rm.project_id = cp.legacy_project_id THEN 0 ELSE 1 END, rm.id ASC
                 LIMIT 1
@@ -2254,7 +2345,7 @@ async function healCaseAlumniRoleByCaseId(caseId, { forceSyncFromStudent = false
                   FROM research_memberships rm_f
                   JOIN research_projects rp_f ON rp_f.id = rm_f.project_id
                   WHERE rm_f.user_id = s.user_id
-                    AND rm_f.member_type = 'Mahasiswa'
+                    AND LOWER(COALESCE(rm_f.member_type, 'mahasiswa')) = 'mahasiswa'
                   ORDER BY rm_f.id ASC
                   LIMIT 1
                 ) rp_primary ON TRUE
@@ -2270,7 +2361,7 @@ async function healCaseAlumniRoleByCaseId(caseId, { forceSyncFromStudent = false
                   FROM research_memberships rm_f
                   JOIN research_projects rp_f ON rp_f.id = rm_f.project_id
                   WHERE rm_f.user_id = s.user_id
-                    AND rm_f.member_type = 'Mahasiswa'
+                    AND LOWER(COALESCE(rm_f.member_type, 'mahasiswa')) = 'mahasiswa'
                   ORDER BY rm_f.id ASC
                   LIMIT 1
                 ) rp_primary ON TRUE
@@ -2311,7 +2402,9 @@ async function healCaseAlumniRoleByCaseId(caseId, { forceSyncFromStudent = false
       } else if (dmDiv && !isGenericOrAlumniRole(dmDiv)) {
         targetRole = dmDiv;
       } else if (forceSyncFromStudent && !isGenericOrAlumniRole(resolvedRole)) {
-        targetRole = resolvedRole;
+        targetRole = (resolvedRole.toLowerCase() === "web developer" && inferredRole && inferredRole.toLowerCase() !== "web developer")
+          ? inferredRole
+          : resolvedRole;
       } else {
         const candidate = pickBestResolvedRole(resolvedRole, snapshotRole);
         if (candidate.toLowerCase() === "web developer" && inferredRole && inferredRole.toLowerCase() !== "web developer") {
@@ -2381,12 +2474,12 @@ async function healCaseAlumniRoleByCaseId(caseId, { forceSyncFromStudent = false
       if (completionParticipantUpdate.rowCount > 0) updatedAny = true;
     }
 
-    if (!updatedAny) {
+    if (!updatedAny && !forceSyncFromStudent) {
       await client.query("ROLLBACK");
       return false;
     }
 
-    if (["draft_created", "issued"].includes(caseRow.case_status)) {
+    if (["draft_created", "issued"].includes(caseRow.case_status) || caseRow.completion_document_id || projectRows.some((r) => r.certificate_document_id)) {
       const completion = await regenerateCompletionDocument(client, { caseRow, projectRows });
       if (completion?.finalPath) generatedFiles.push(completion.finalPath);
       for (const projectRow of projectRows) {

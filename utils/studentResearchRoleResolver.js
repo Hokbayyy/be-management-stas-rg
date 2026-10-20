@@ -133,7 +133,7 @@ function buildResolvedProjectRoleSql({
       LEFT JOIN research_memberships rm_cur
         ON rm_cur.user_id = ${userIdExpr}
        AND rm_cur.project_id = ${projectIdExpr}
-       AND rm_cur.member_type = 'Mahasiswa'
+       AND LOWER(COALESCE(rm_cur.member_type, 'mahasiswa')) = 'mahasiswa'
       LEFT JOIN research_divisions rd_mem
         ON rd_mem.id = rm_cur.division_id
       LEFT JOIN graduation_submission_projects gsp_cur
@@ -143,7 +143,7 @@ function buildResolvedProjectRoleSql({
         SELECT rm_f.peran, rm_f.division_id
         FROM research_memberships rm_f
         WHERE rm_f.user_id = ${userIdExpr}
-          AND rm_f.member_type = 'Mahasiswa'
+          AND LOWER(COALESCE(rm_f.member_type, 'mahasiswa')) = 'mahasiswa'
         ORDER BY
           CASE
             WHEN LOWER(BTRIM(COALESCE(rm_f.peran, ''))) NOT IN (${SQL_GENERIC_ROLES_LIST}, 'web developer') THEN 0
@@ -511,6 +511,36 @@ async function executeRoleRecoveryQueries() {
           AND primary_p.role IS NOT NULL
           AND LOWER(BTRIM(primary_p.role)) NOT IN (${SQL_GENERIC_ROLES_LIST}, 'web developer')
           AND (ods.participant_role IS DISTINCT FROM primary_p.role OR LOWER(BTRIM(COALESCE(ods.participant_role, ''))) IN (${SQL_GENERIC_ROLES_LIST}, 'web developer'))
+      `).catch(() => {});
+
+      // 13. Synchronize dc_final_activity_case_projects snapshot role and title from research_memberships for pending/draft cases
+      await pool.query(`
+        UPDATE dc_final_activity_case_projects cp
+        SET project_snapshot = jsonb_set(
+          jsonb_set(
+            cp.project_snapshot,
+            '{role}',
+            to_jsonb(BTRIM(rm.peran))
+          ),
+          '{title}',
+          to_jsonb(COALESCE(rp.title, cp.project_snapshot->>'title'))
+        ),
+        updated_at = NOW()
+        FROM dc_final_activity_cases c
+        JOIN students s ON s.id = c.legacy_student_id
+        JOIN research_memberships rm
+          ON rm.user_id = s.user_id
+         AND rm.project_id = cp.legacy_project_id
+         AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'
+        JOIN research_projects rp ON rp.id = rm.project_id
+        WHERE cp.final_activity_case_id = c.id
+          AND c.case_status IN ('pending', 'draft_created')
+          AND NULLIF(BTRIM(rm.peran), '') IS NOT NULL
+          AND LOWER(BTRIM(rm.peran)) NOT IN (${SQL_GENERIC_ROLES_LIST})
+          AND (
+            cp.project_snapshot->>'role' IS DISTINCT FROM BTRIM(rm.peran)
+            OR cp.project_snapshot->>'title' IS DISTINCT FROM rp.title
+          )
       `).catch(() => {});
 }
 
