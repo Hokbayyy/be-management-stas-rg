@@ -33,18 +33,21 @@ const graduationSubmissionsRouter = require("./graduationSubmissions");
 const documentCenterRouter = require("./documentCenter");
 const reactivationsRouter = require("./reactivations");
 const evaluationsRouter = require("./evaluations");
+const rbacRouter = require("./rbac");
 const { requireRoleStrict } = require("../../utils/roleGuard");
 
 const router = express.Router();
 
 const requireStudentsOperatorOrDosen = requireRoleStrict(["operator", "dosen"]);
 const STUDENT_OWN_DOCUMENT_UPLOAD_PATH = /^\/[^/]+\/documents\/[^/]+\/?$/;
+const STUDENT_OWN_RBAC_PATH = /^\/[^/]+\/(role-assignments|effective-permissions)\/?$/;
 
 function requireStudentsAccess(req, res, next) {
   const role = String(req.authUser?.role || "").trim().toLowerCase();
   const isOwnDocumentUpload = req.method === "PUT" && STUDENT_OWN_DOCUMENT_UPLOAD_PATH.test(req.path || "");
+  const isStudentRbacPath = req.method === "GET" && STUDENT_OWN_RBAC_PATH.test(req.path || "");
 
-  if (role === "mahasiswa" && isOwnDocumentUpload) {
+  if (role === "mahasiswa" && (isOwnDocumentUpload || isStudentRbacPath)) {
     return next();
   }
 
@@ -53,6 +56,7 @@ function requireStudentsAccess(req, res, next) {
 
 router.use("/health", healthRouter);
 router.use("/auth", authRouter);
+router.use("/rbac", rbacRouter);
 
 router.use("/students", requireStudentsAccess, studentsRouter);
 router.use("/operators", operatorsRouter);

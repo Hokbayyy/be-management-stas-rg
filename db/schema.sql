@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS users (
   phone TEXT,
   password_hash TEXT,
   prodi TEXT,
+  photo_url TEXT,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -891,6 +892,15 @@ CREATE TABLE IF NOT EXISTS research_join_requests (
 CREATE INDEX IF NOT EXISTS idx_research_join_requests_project ON research_join_requests(project_id);
 CREATE INDEX IF NOT EXISTS idx_research_join_requests_student ON research_join_requests(student_id);
 
+CREATE TABLE IF NOT EXISTS evaluation_groups (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS evaluation_periods (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
@@ -927,15 +937,6 @@ CREATE TABLE IF NOT EXISTS evaluation_criteria (
   UNIQUE (scoring_version, key)
 );
 CREATE INDEX IF NOT EXISTS idx_evaluation_criteria_type_sort ON evaluation_criteria(period_type, sort_order ASC);
-
-CREATE TABLE IF NOT EXISTS evaluation_groups (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  description TEXT,
-  is_active BOOLEAN NOT NULL DEFAULT TRUE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
 
 CREATE TABLE IF NOT EXISTS evaluation_group_role_mappings (
   id TEXT PRIMARY KEY,
@@ -1133,5 +1134,111 @@ CREATE INDEX IF NOT EXISTS idx_evaluation_monitoring_grants_user ON evaluation_m
 CREATE INDEX IF NOT EXISTS idx_evaluation_monitoring_grants_period ON evaluation_monitoring_grants(period_id);
 CREATE INDEX IF NOT EXISTS idx_evaluation_monitoring_grants_group ON evaluation_monitoring_grants(group_id);
 CREATE INDEX IF NOT EXISTS idx_evaluation_monitoring_grants_active ON evaluation_monitoring_grants(is_active);
+
+-- 17. rbac_roles
+CREATE TABLE IF NOT EXISTS rbac_roles (
+  id TEXT PRIMARY KEY,
+  code VARCHAR(50) UNIQUE NOT NULL,
+  name VARCHAR(100) NOT NULL,
+  description TEXT,
+  is_system BOOLEAN NOT NULL DEFAULT FALSE,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_rbac_roles_active_code ON rbac_roles(is_active, code);
+
+-- 18. rbac_permissions
+CREATE TABLE IF NOT EXISTS rbac_permissions (
+  id TEXT PRIMARY KEY,
+  code VARCHAR(80) UNIQUE NOT NULL,
+  name VARCHAR(100) NOT NULL,
+  description TEXT,
+  module VARCHAR(50) NOT NULL,
+  allowed_scope_types TEXT[] NOT NULL DEFAULT '{"LAB","PROJECT","DIVISION"}',
+  enforcement_status VARCHAR(20) NOT NULL DEFAULT 'ENFORCED',
+  is_protected BOOLEAN NOT NULL DEFAULT FALSE,
+  is_delegable BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_rbac_permissions_module ON rbac_permissions(module);
+
+-- 19. rbac_role_permissions
+CREATE TABLE IF NOT EXISTS rbac_role_permissions (
+  role_id TEXT NOT NULL REFERENCES rbac_roles(id) ON DELETE CASCADE,
+  permission_id TEXT NOT NULL REFERENCES rbac_permissions(id) ON DELETE CASCADE,
+  granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  granted_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  PRIMARY KEY (role_id, permission_id)
+);
+
+-- 20. student_role_assignments
+CREATE TABLE IF NOT EXISTS student_role_assignments (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  role_id TEXT NOT NULL REFERENCES rbac_roles(id) ON DELETE CASCADE,
+  scope_type VARCHAR(20) NOT NULL CHECK (scope_type IN ('LAB', 'PROJECT', 'DIVISION')),
+  scope_id TEXT,
+  assigned_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at TIMESTAMPTZ,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  revoked_at TIMESTAMPTZ,
+  revoked_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  revocation_reason TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_student_active_role_scope
+  ON student_role_assignments (student_id, role_id, scope_type, COALESCE(scope_id, 'GLOBAL_LAB'))
+  WHERE is_active = TRUE AND revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_student_role_assignments_student ON student_role_assignments(student_id);
+CREATE INDEX IF NOT EXISTS idx_student_role_assignments_scope ON student_role_assignments(scope_type, scope_id);
+CREATE INDEX IF NOT EXISTS idx_student_role_assignments_active ON student_role_assignments(is_active, expires_at);
+
+-- 21. rbac_legacy_role_mappings
+CREATE TABLE IF NOT EXISTS rbac_legacy_role_mappings (
+  id TEXT PRIMARY KEY,
+  legacy_role_pattern TEXT NOT NULL UNIQUE,
+  canonical_role_id TEXT NOT NULL REFERENCES rbac_roles(id) ON DELETE CASCADE,
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- 22. rbac_audit_logs
+CREATE TABLE IF NOT EXISTS rbac_audit_logs (
+  id TEXT PRIMARY KEY,
+  actor_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  actor_role TEXT NOT NULL,
+  action TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  detail JSONB NOT NULL DEFAULT '{}',
+  ip INET,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_rbac_audit_logs_target ON rbac_audit_logs(target_type, target_id);
+CREATE INDEX IF NOT EXISTS idx_rbac_audit_logs_actor ON rbac_audit_logs(actor_id);
+CREATE INDEX IF NOT EXISTS idx_rbac_audit_logs_created ON rbac_audit_logs(created_at DESC);
+
+-- 23. rbac_legacy_reconciliations
+CREATE TABLE IF NOT EXISTS rbac_legacy_reconciliations (
+  id TEXT PRIMARY KEY,
+  student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+  legacy_peran TEXT NOT NULL,
+  status VARCHAR(30) NOT NULL DEFAULT 'PENDING_RECONCILIATION' CHECK (status IN ('PENDING_RECONCILIATION', 'RECONCILED', 'IGNORED')),
+  reconciled_role_id TEXT REFERENCES rbac_roles(id) ON DELETE SET NULL,
+  reconciled_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  reconciled_at TIMESTAMPTZ,
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_rbac_reconciliation_student_project_peran
+  ON rbac_legacy_reconciliations (student_id, project_id, legacy_peran);
+CREATE INDEX IF NOT EXISTS idx_rbac_reconciliations_status ON rbac_legacy_reconciliations(status);
 
 COMMIT;

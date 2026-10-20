@@ -313,7 +313,11 @@ function normalizeMemberType(value) {
 }
 
 function isKetuaPeran(value) {
-  return String(value || "").trim().toLowerCase().includes("ketua");
+  const norm = String(value || "").trim().toLowerCase();
+  if (/\b(wakil|asisten|assistant|vice|co-|sub-)\b/i.test(norm)) {
+    return false;
+  }
+  return norm.includes("ketua");
 }
 
 async function ensureSingleKetuaPerScope({ projectId, userIdToExclude, memberType, peran }) {
@@ -327,6 +331,7 @@ async function ensureSingleKetuaPerScope({ projectId, userIdToExclude, memberTyp
     FROM research_memberships
     WHERE project_id = $1
       AND LOWER(COALESCE(peran, '')) LIKE '%ketua%'
+      AND NOT (LOWER(COALESCE(peran, '')) ~* '\\y(wakil|asisten|assistant|vice|co-|sub-)\\y')
       AND LOWER(COALESCE(member_type, '')) ${isMahasiswaKetua ? "=" : "<>"} 'mahasiswa'
       ${userIdToExclude ? "AND user_id != $2" : ""}
     LIMIT 1
@@ -341,6 +346,8 @@ async function ensureSingleKetuaPerScope({ projectId, userIdToExclude, memberTyp
     : `Hanya boleh ada 1 Ketua Peneliti/Pembimbing per riset. Ketua saat ini: ${existingKetua.rows[0].peran}`;
 }
 
+const { hasEffectivePermission } = require("../../utils/rbacService");
+
 async function isProjectLeaderMember({ userId, projectId }) {
   if (!userId || !projectId) return false;
 
@@ -352,6 +359,7 @@ async function isProjectLeaderMember({ userId, projectId }) {
       AND user_id = $2
       AND LOWER(COALESCE(member_type, '')) = 'mahasiswa'
       AND LOWER(COALESCE(peran, '')) LIKE '%ketua%'
+      AND NOT (LOWER(COALESCE(peran, '')) ~* '\\y(wakil|asisten|assistant|vice|co-|sub-)\\y')
       AND COALESCE(status, 'Aktif') = 'Aktif'
       AND (selesai IS NULL OR selesai >= CURRENT_DATE)
     LIMIT 1
@@ -359,7 +367,18 @@ async function isProjectLeaderMember({ userId, projectId }) {
     [projectId, userId]
   );
 
-  return result.rowCount > 0;
+  if (result.rowCount > 0) return true;
+
+  try {
+    const hasLeaderPermission = await hasEffectivePermission({
+      userId,
+      permission: "scrum.sprint.manage",
+      projectId
+    });
+    return hasLeaderPermission;
+  } catch (err) {
+    return false;
+  }
 }
 
 async function getBoardAccessContext({ req, projectId }) {
@@ -370,13 +389,27 @@ async function getBoardAccessContext({ req, projectId }) {
     hasAccess && role === "mahasiswa"
       ? await isProjectLeaderMember({ userId, projectId })
       : false;
+  const isManager = hasAccess && (isBoardManagerRole(role) || isLeaderMember);
+
+  let canCreateTask = isManager;
+  let canManageTask = isManager;
+  if (hasAccess && role === "mahasiswa" && !isManager) {
+    try {
+      canCreateTask = await hasEffectivePermission({ userId, permission: "scrum.task.create", projectId });
+      canManageTask = await hasEffectivePermission({ userId, permission: "scrum.task.manage", projectId });
+    } catch (err) {
+      // ignore
+    }
+  }
 
   return {
     role,
     userId,
     hasAccess,
     isLeaderMember,
-    isManager: hasAccess && (isBoardManagerRole(role) || isLeaderMember),
+    isManager,
+    canCreateTask,
+    canManageTask,
     canFillExistingCards: hasAccess && (isBoardManagerRole(role) || role === "mahasiswa")
   };
 }
@@ -1694,9 +1727,9 @@ router.post(
   asyncHandler(async (req, res) => {
     await ensureResearchBoardTables();
     const access = await getBoardAccessContext({ req, projectId: req.params.id });
-    if (!access.isManager) {
+    if (!access.isManager && !access.canCreateTask) {
       return res.status(403).json({
-        message: "Akses ditolak. Anggota biasa hanya dapat mengisi progress card yang sudah tersedia."
+        message: "Akses ditolak. Anda tidak memiliki izin untuk membuat kartu tugas."
       });
     }
 
@@ -1818,7 +1851,7 @@ router.patch(
       return res.status(403).json({ message: "Akses ditolak mengubah task board." });
     }
 
-    if (!access.isManager) {
+    if (!access.isManager && !access.canManageTask) {
       const unexpectedFields = getUnexpectedBoardFillFields(req.body || {});
       if (unexpectedFields.length > 0) {
         return res.status(403).json({
@@ -2285,9 +2318,9 @@ router.delete(
   asyncHandler(async (req, res) => {
     await ensureResearchBoardTables();
     const access = await getBoardAccessContext({ req, projectId: req.params.id });
-    if (!access.isManager) {
+    if (!access.isManager && !access.canManageTask) {
       return res.status(403).json({
-        message: "Akses ditolak. Anggota biasa tidak dapat menghapus card progress."
+        message: "Akses ditolak. Anda tidak memiliki izin untuk menghapus kartu tugas."
       });
     }
 
@@ -2354,9 +2387,9 @@ router.post(
   asyncHandler(async (req, res) => {
     await ensureResearchBoardTables();
     const access = await getBoardAccessContext({ req, projectId: req.params.id });
-    if (!access.isManager) {
+    if (!access.isManager && !access.canManageTask) {
       return res.status(403).json({
-        message: "Akses ditolak. Anggota biasa hanya dapat mencentang checklist yang sudah tersedia."
+        message: "Akses ditolak. Anda tidak memiliki izin untuk mengelola checklist subtask."
       });
     }
 

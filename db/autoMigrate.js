@@ -98,6 +98,13 @@ async function autoMigrateDatabase(clientOrPool = pool, { log = console.log, sil
     // ignore
   }
 
+  try {
+    const { ensureRbacTables } = require("../utils/rbacService");
+    await ensureRbacTables(clientOrPool);
+  } catch (err) {
+    // ignore
+  }
+
   if (!silent) log("[AutoMigrate] Database auto-generation complete.");
   return true;
 }

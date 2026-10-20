@@ -1525,4 +1525,106 @@ router.delete(
   })
 );
 
+// ──────────────────────────────────────────────────────────────
+// Dynamic Student Role Assignments & Effective Permissions
+// ──────────────────────────────────────────────────────────────
+const {
+  listStudentRoleAssignments,
+  assignStudentRole,
+  revokeStudentRoleAssignment,
+  resolveStudentEffectivePermissions
+} = require("../../utils/rbacService");
+const { extractRole, requireRoleStrict } = require("../../utils/roleGuard");
+const { resolveStudentRecord } = require("../../utils/studentResolver");
+const requireOperator = requireRoleStrict(["operator", "admin"]);
+
+function getActorContext(req) {
+  return {
+    actorId: req.authUser?.id || null,
+    actorRole: extractRole(req) || "ANONYMOUS",
+    ip: req.ip || null
+  };
+}
+
+async function assertCanReadStudentPermissions(req, studentId) {
+  const actorRole = extractRole(req);
+  if (actorRole === "operator" || actorRole === "admin" || actorRole === "dosen") {
+    return;
+  }
+  const student = await resolveStudentRecord(studentId);
+  if (!student || student.user_id !== req.authUser?.id) {
+    const err = new Error("Akses ditolak. Anda hanya dapat melihat hak akses milik sendiri.");
+    err.statusCode = 403;
+    throw err;
+  }
+}
+
+router.get(
+  "/:id/role-assignments",
+  asyncHandler(async (req, res) => {
+    const studentId = requireSafeId(req.params.id);
+    await assertCanReadStudentPermissions(req, studentId);
+
+    const includeRevoked = req.query.includeRevoked === "true";
+    const assignments = await listStudentRoleAssignments(studentId, { includeRevoked });
+    res.json(assignments);
+  })
+);
+
+router.post(
+  "/:id/role-assignments",
+  requireOperator,
+  asyncHandler(async (req, res) => {
+    const studentId = requireSafeId(req.params.id);
+    const result = await assignStudentRole(studentId, req.body, getActorContext(req));
+    res.status(201).json({
+      message: "Penugasan role berhasil disimpan.",
+      data: result
+    });
+  })
+);
+
+router.delete(
+  "/:id/role-assignments/:assignmentId",
+  requireOperator,
+  asyncHandler(async (req, res) => {
+    const assignmentId = requireSafeId(req.params.assignmentId);
+    const reason = req.body?.reason || req.query?.reason;
+    const result = await revokeStudentRoleAssignment(assignmentId, { reason }, getActorContext(req));
+    res.json({
+      message: "Penugasan role berhasil dicabut.",
+      data: result
+    });
+  })
+);
+
+router.post(
+  "/:id/role-assignments/:assignmentId/revoke",
+  requireOperator,
+  asyncHandler(async (req, res) => {
+    const assignmentId = requireSafeId(req.params.assignmentId);
+    const reason = req.body?.reason || req.query?.reason;
+    const result = await revokeStudentRoleAssignment(assignmentId, { reason }, getActorContext(req));
+    res.json({
+      message: "Penugasan role berhasil dicabut.",
+      data: result
+    });
+  })
+);
+
+router.get(
+  "/:id/effective-permissions",
+  asyncHandler(async (req, res) => {
+    const studentId = requireSafeId(req.params.id);
+    await assertCanReadStudentPermissions(req, studentId);
+
+    const { projectId, divisionId } = req.query;
+    const effective = await resolveStudentEffectivePermissions(studentId, {
+      projectId: projectId ? String(projectId).trim() : null,
+      divisionId: divisionId ? String(divisionId).trim() : null
+    });
+    res.json(effective);
+  })
+);
+
 module.exports = router;
