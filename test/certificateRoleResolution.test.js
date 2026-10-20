@@ -13,7 +13,7 @@ test("resolveCertificateRole preserves specific position names", () => {
   assert.equal(resolveCertificateRole("Web Developer", "Riset"), "Web Developer");
 });
 
-test("resolveCertificateRole replaces generic roles ('Alumni', 'Anggota', 'Anggota Riset', 'Peserta Magang', 'Mahasiswa', 'Peserta') with specific role 'Web Developer'", () => {
+test("resolveCertificateRole replaces generic roles ('Alumni', 'Anggota', 'Anggota Riset', 'Peserta Magang', 'Mahasiswa', 'Peserta') with activity-aware default ('Peneliti' for Riset, 'Web Developer' for Magang)", () => {
   for (const genericRole of [
     "Alumni",
     "alumni",
@@ -26,14 +26,14 @@ test("resolveCertificateRole replaces generic roles ('Alumni', 'Anggota', 'Anggo
     "Mahasiswa",
     "Peserta"
   ]) {
-    assert.equal(resolveCertificateRole(genericRole, "Riset"), "Web Developer");
+    assert.equal(resolveCertificateRole(genericRole, "Riset"), "Peneliti");
     assert.equal(resolveCertificateRole(genericRole, "Magang"), "Web Developer");
   }
 });
 
-test("resolveCertificateRole handles null or empty role gracefully with specific role 'Web Developer'", () => {
-  assert.equal(resolveCertificateRole(null, "Riset"), "Web Developer");
-  assert.equal(resolveCertificateRole("", "Riset"), "Web Developer");
+test("resolveCertificateRole handles null or empty role gracefully with activity-aware default ('Peneliti' for Riset, 'Web Developer' for Magang)", () => {
+  assert.equal(resolveCertificateRole(null, "Riset"), "Peneliti");
+  assert.equal(resolveCertificateRole("", "Riset"), "Peneliti");
   assert.equal(resolveCertificateRole(undefined, "Magang"), "Web Developer");
   assert.equal(resolveCertificateRole("   ", "Magang"), "Web Developer");
 });
@@ -70,9 +70,19 @@ test("buildCertificateData produces specific projectRole from snapshot and rejec
     const result2 = buildCertificateData(caseRow, projectRowWithGenericRole);
     assert.equal(result2.studentName, "Budi Santoso");
     assert.equal(result2.projectTitle, "Smart Monitoring IoT");
-    assert.equal(result2.projectRole, "Web Developer");
+    assert.equal(result2.projectRole, "IoT");
     assert.notEqual(result2.projectRole, generic);
   }
+
+  const projectRowNoKeyword = {
+    project_snapshot: {
+      title: "Penelitian Sistem Terapan",
+      role: "Anggota"
+    },
+    display_order: 0
+  };
+  const result3 = buildCertificateData(caseRow, projectRowNoKeyword);
+  assert.equal(result3.projectRole, "Peneliti");
 });
 
 test("documentCenter utilities do not reference non-existent legacy_membership_id column", async () => {
@@ -190,6 +200,122 @@ test("logbooks GET endpoint supports pagination limit and offset", async () => {
   assert.ok(content.includes("req.query.limit"), "logbooks.js should parse limit from req.query");
   assert.ok(content.includes("req.query.offset"), "logbooks.js should parse offset from req.query");
   assert.ok(content.includes("${paginationClause}"), "logbooks.js SQL query should include paginationClause");
+});
+
+test("Creative and Social Media projects correctly resolve to Creative Content instead of Web Developer", () => {
+  const { inferRoleFromProjectTitle } = require("../utils/studentResearchRoleResolver");
+  const { buildLetterData } = require("../utils/documentCenterCompletionLetterTemplates");
+  const { buildCertificateData, resolveCertificateRole } = require("../utils/documentCenterCertificateTemplates");
+
+  assert.equal(inferRoleFromProjectTitle("Creative and Social Media"), "Creative Content");
+  assert.equal(inferRoleFromProjectTitle("Creative Content"), "Creative Content");
+  assert.equal(inferRoleFromProjectTitle("Social Media"), "Sosial Media");
+
+  // Certificate data test for Creative and Social Media with Web Developer role
+  const caseRow = {
+    student_snapshot: { name: "Anisa Rahma" },
+    period_snapshot: { startDate: "2026-10-05", endDate: "2026-10-05" },
+    activity_type: "Magang"
+  };
+  const projectRowCreative = {
+    project_snapshot: {
+      title: "Creative and Social Media",
+      role: "Web Developer"
+    },
+    display_order: 0
+  };
+  const certData = buildCertificateData(caseRow, projectRowCreative);
+  assert.equal(certData.projectRole, "Creative Content");
+
+  // Completion letter test for Creative and Social Media with Web Developer role
+  const letterData = buildLetterData({
+    studentSnapshot: caseRow.student_snapshot,
+    periodSnapshot: caseRow.period_snapshot,
+    projectSnapshot: projectRowCreative.project_snapshot,
+    activityType: "Magang"
+  });
+  assert.equal(letterData.projectRole, "Creative Content");
+  assert.ok(
+    letterData.activityParagraph.includes('dengan peran sebagai Creative Content'),
+    "Activity paragraph should state role as Creative Content"
+  );
+  assert.ok(
+    !letterData.activityParagraph.includes('dengan peran sebagai Web Developer'),
+    "Activity paragraph should NOT state role as Web Developer"
+  );
+});
+
+test("Certificate generation prioritizes role assigned in Data Mahasiswa on research task", () => {
+  const { buildCertificateData, resolveCertificateRole } = require("../utils/documentCenterCertificateTemplates");
+
+  const risetCase = {
+    student_snapshot: { name: "Rizky Pratama" },
+    period_snapshot: { startDate: "2026-02-01", endDate: "2026-08-01" },
+    activity_type: "Riset"
+  };
+
+  // Test 1: Role from Data Mahasiswa is "Peneliti"
+  const projectPeneliti = {
+    project_snapshot: {
+      title: "Riset Machine Learning STAS",
+      role: "Peneliti"
+    },
+    display_order: 0
+  };
+  const cert1 = buildCertificateData(risetCase, projectPeneliti);
+  assert.equal(cert1.projectRole, "Peneliti");
+
+  // Test 2: Role from Data Mahasiswa is "UI/UX Designer"
+  const projectDesigner = {
+    project_snapshot: {
+      title: "Riset Machine Learning STAS",
+      role: "UI/UX Designer"
+    },
+    display_order: 0
+  };
+  const cert2 = buildCertificateData(risetCase, projectDesigner);
+  assert.equal(cert2.projectRole, "UI/UX Designer");
+
+  // Test 3: Role from Data Mahasiswa is "Data Scientist"
+  const projectDataScientist = {
+    project_snapshot: {
+      title: "Creative and Social Media",
+      role: "Data Scientist"
+    },
+    display_order: 0
+  };
+  const cert3 = buildCertificateData(risetCase, projectDataScientist);
+  assert.equal(cert3.projectRole, "Data Scientist");
+
+  // Test 4: Role from Data Mahasiswa was generic "Anggota Riset" on generic title -> resolves to "Peneliti", not "Web Developer"
+  const projectGenericRiset = {
+    project_snapshot: {
+      title: "Proyek Riset Khusus",
+      role: "Anggota Riset"
+    },
+    display_order: 0
+  };
+  const cert4 = buildCertificateData(risetCase, projectGenericRiset);
+  assert.equal(cert4.projectRole, "Peneliti");
+  assert.notEqual(cert4.projectRole, "Web Developer");
+
+  // Test 5: Magang case with multiple projects - second project (display_order: 1) is a Riset task
+  const magangCase = {
+    student_snapshot: { name: "Dewi Lestari" },
+    period_snapshot: { startDate: "2026-01-01", endDate: "2026-06-01" },
+    activity_type: "Magang"
+  };
+  const additionalRisetProject = {
+    project_snapshot: {
+      title: "Riset Computer Vision",
+      role: "Anggota"
+    },
+    display_order: 1
+  };
+  const cert5 = buildCertificateData(magangCase, additionalRisetProject);
+  assert.equal(cert5.activityType, "Riset");
+  assert.equal(cert5.projectRole, "Peneliti");
+  assert.notEqual(cert5.projectRole, "Web Developer");
 });
 
 

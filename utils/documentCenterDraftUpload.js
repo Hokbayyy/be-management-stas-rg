@@ -13,7 +13,8 @@ const {
 } = require("./documentCenterStorage");
 const {
   buildResolvedProjectRoleSql,
-  ensureSpecificStudentResearchRoles
+  ensureSpecificStudentResearchRoles,
+  inferRoleFromProjectTitle
 } = require("./studentResearchRoleResolver");
 
 const MAX_RAW_PDF_BYTES = 8 * 1024 * 1024;
@@ -401,7 +402,7 @@ async function resolveParticipantSnapshots(participants, definition) {
       periodSnapshot: periodSnapshotData
         ? `${periodSnapshotData.activityType}: ${periodSnapshotData.startDate}${periodSnapshotData.endDate ? ` s.d. ${periodSnapshotData.endDate}` : ""}`
         : null,
-      participantRole: isSpecificRole(project?.peran) ? project.peran.trim() : "Web Developer",
+      participantRole: isSpecificRole(project?.peran) ? project.peran.trim() : (inferRoleFromProjectTitle(project?.title) || "Web Developer"),
       displayOrder,
       actualActivityType: periodSnapshotData?.activityType || null,
       studentActivityType: student.student_activity_type,
@@ -413,7 +414,7 @@ async function resolveParticipantSnapshots(participants, definition) {
             periodText: project.period_text || null,
             status: project.project_status,
             membershipStatus: project.membership_status,
-            role: isSpecificRole(project.peran) ? project.peran.trim() : "Web Developer",
+            role: isSpecificRole(project.peran) ? project.peran.trim() : (inferRoleFromProjectTitle(project.title) || "Web Developer"),
             joinedAt: project.bergabung || null,
             endedAt: project.selesai || null
           }

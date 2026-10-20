@@ -19,7 +19,8 @@ const {
 const {
   SQL_GENERIC_ROLES_LIST,
   pickBestResolvedRole,
-  buildResolvedProjectRoleSql
+  buildResolvedProjectRoleSql,
+  inferRoleFromProjectTitle
 } = require("./studentResearchRoleResolver");
 
 const PAGE_WIDTH = 842.25;
@@ -413,20 +414,27 @@ function wrapRichSegments(segments, fonts, size, maxWidth) {
   }).filter((line) => line.length);
 }
 
-function resolveCertificateRole(role) {
+function resolveCertificateRole(role, activityType, projectTitle) {
   const normalized = String(role || "").trim();
+  const inferred = inferRoleFromProjectTitle(projectTitle);
   if (
     !normalized ||
     ["alumni", "anggota", "anggota riset", "peserta magang", "mahasiswa", "peserta"].includes(normalized.toLowerCase())
   ) {
-    return "Web Developer";
+    if (inferred) {
+      return inferred;
+    }
+    return activityType === "Riset" ? "Peneliti" : "Web Developer";
+  }
+  if (normalized.toLowerCase() === "web developer" && inferred && inferred.toLowerCase() !== "web developer") {
+    return inferred;
   }
   return normalized;
 }
 
 function buildParagraphSegments(data) {
   const projectTitle = data.projectTitle || "proyek/kegiatan";
-  const role = resolveCertificateRole(data.projectRole, data.activityType);
+  const role = resolveCertificateRole(data.projectRole, data.activityType, projectTitle);
   if (data.activityType === "Riset") {
     return [
       { text: "Telah berpartisipasi aktif dalam proyek ", bold: false },
@@ -494,7 +502,7 @@ async function renderCertificatePdf({ backgroundBytes, templateKey, data, docume
     const compactData = {
       ...data,
       projectTitle: String(data.projectTitle || "proyek/kegiatan").slice(0, 80),
-      projectRole: resolveCertificateRole(data.projectRole, data.activityType).slice(0, 40),
+      projectRole: resolveCertificateRole(data.projectRole, data.activityType, data.projectTitle).slice(0, 40),
       periodLabel: String(data.periodLabel || "-").slice(0, 60)
     };
     lines = wrapRichSegments(buildParagraphSegments(compactData), fonts, paragraphSize, paragraph.width).slice(0, paragraph.maxLines);
@@ -613,12 +621,13 @@ function certificateActivityType(caseRow, projectRow) {
 function buildCertificateData(caseRow, projectRow) {
   const activityType = certificateActivityType(caseRow, projectRow);
   const rawRole = projectRow.project_snapshot?.role || projectRow.project_snapshot?.position;
+  const projectTitle = projectRow.project_snapshot?.title || projectRow.project_snapshot?.name || projectRow.legacy_project_id;
   return {
     studentName: caseRow.student_snapshot?.name || caseRow.legacy_student_id,
     activityType,
     periodLabel: periodLabel(caseRow.period_snapshot),
-    projectTitle: projectRow.project_snapshot?.title || projectRow.project_snapshot?.name || projectRow.legacy_project_id,
-    projectRole: resolveCertificateRole(rawRole, activityType)
+    projectTitle,
+    projectRole: resolveCertificateRole(rawRole, activityType, projectTitle)
   };
 }
 
@@ -649,6 +658,27 @@ async function generateCertificateDraft({ id, authUser, ip }) {
       SELECT cp.*, c.legacy_student_id, c.student_key, c.student_snapshot, c.activity_type,
              c.period_key, c.period_snapshot, c.outcome, c.case_status,
              (
+               SELECT BTRIM(rm.peran)
+               FROM students s
+               JOIN research_memberships rm
+                 ON rm.user_id = s.user_id
+                AND rm.project_id = cp.legacy_project_id
+                AND rm.member_type = 'Mahasiswa'
+               WHERE s.id = c.legacy_student_id
+               LIMIT 1
+             ) AS datamahasiswa_peran,
+             (
+               SELECT BTRIM(rd.name)
+               FROM students s
+               JOIN research_memberships rm
+                 ON rm.user_id = s.user_id
+                AND rm.project_id = cp.legacy_project_id
+                AND rm.member_type = 'Mahasiswa'
+               LEFT JOIN research_divisions rd ON rd.id = rm.division_id
+               WHERE s.id = c.legacy_student_id
+               LIMIT 1
+             ) AS datamahasiswa_division,
+             (
                SELECT BTRIM(gsp.position_label)
                FROM graduation_submission_projects gsp
                WHERE gsp.student_id = c.legacy_student_id
@@ -678,11 +708,37 @@ async function generateCertificateDraft({ id, authUser, ip }) {
     if (row.outcome !== "completed" || !["Magang", "Riset"].includes(row.activity_type) || row.certificate_required !== true || row.certificate_status !== "pending" || row.certificate_document_id || row.case_status === "revoked") {
       throw httpError(409, "Sertifikat tidak dapat dibuatkan draft generator.");
     }
-    const resolvedRole = pickBestResolvedRole(
-      row.rm_peran,
-      row.graduation_position_label,
-      row.project_snapshot?.role
-    );
+    const projectTitle = row.project_snapshot?.title || row.project_snapshot?.shortTitle || "";
+    const inferredRole = inferRoleFromProjectTitle(projectTitle);
+    const dmRole = typeof row.datamahasiswa_peran === "string" ? row.datamahasiswa_peran.trim() : "";
+    const dmDiv = typeof row.datamahasiswa_division === "string" ? row.datamahasiswa_division.trim() : "";
+    let snapshotRole = typeof row.project_snapshot?.role === "string" ? row.project_snapshot.role.trim() : "";
+
+    let resolvedRole = null;
+    if (dmRole && !isGenericOrAlumniRole(dmRole)) {
+      if (dmRole.toLowerCase() === "web developer" && inferredRole && inferredRole.toLowerCase() !== "web developer") {
+        resolvedRole = inferredRole;
+      } else {
+        resolvedRole = dmRole;
+      }
+    } else if (dmDiv && !isGenericOrAlumniRole(dmDiv)) {
+      resolvedRole = dmDiv;
+    } else if (row.graduation_position_label && !isGenericOrAlumniRole(row.graduation_position_label)) {
+      resolvedRole = row.graduation_position_label;
+    } else if (row.rm_peran && !isGenericOrAlumniRole(row.rm_peran)) {
+      resolvedRole = row.rm_peran;
+    } else if (snapshotRole && !isGenericOrAlumniRole(snapshotRole)) {
+      if (snapshotRole.toLowerCase() === "web developer" && inferredRole && inferredRole.toLowerCase() !== "web developer") {
+        resolvedRole = inferredRole;
+      } else {
+        resolvedRole = snapshotRole;
+      }
+    } else if (inferredRole) {
+      resolvedRole = inferredRole;
+    } else {
+      resolvedRole = row.activity_type === "Riset" ? "Peneliti" : "Web Developer";
+    }
+
     if (row.project_snapshot?.role !== resolvedRole) {
       row.project_snapshot = { ...(row.project_snapshot || {}), role: resolvedRole };
       await client.query(
@@ -865,10 +921,12 @@ async function renderPublishedCertificateVersion({ client, document, documentNum
   try {
     const rawCertData = snapshot.certificateData || {};
     const effectiveActivityType = rawCertData.activityType || (template.activity_type || "Riset");
+    const certProjectTitle = rawCertData.projectTitle || snapshot.project?.title || "";
     const certData = {
       ...rawCertData,
       activityType: effectiveActivityType,
-      projectRole: resolveCertificateRole(rawCertData.projectRole || snapshot.project?.role, effectiveActivityType)
+      projectTitle: certProjectTitle,
+      projectRole: resolveCertificateRole(rawCertData.projectRole || snapshot.project?.role, effectiveActivityType, certProjectTitle)
     };
     const pdfBuffer = await renderCertificatePdf({
       backgroundBytes: opened.bytes,

@@ -37,6 +37,23 @@ function pickBestResolvedRole(...candidates) {
   return webDevCandidate || "Web Developer";
 }
 
+function inferRoleFromProjectTitle(projectTitle, divisionName) {
+  const div = typeof divisionName === "string" ? divisionName.trim() : "";
+  if (div && !isGenericOrAlumniRole(div)) {
+    return div;
+  }
+  const title = typeof projectTitle === "string" ? projectTitle.trim().toLowerCase() : "";
+  if (!title) return null;
+  if (/creative|konten|content|desain|design|figma|canva/.test(title)) return "Creative Content";
+  if (/sosial\s*media|social\s*media|medsos/.test(title)) return "Sosial Media";
+  if (/data\s*science|machine\s*learning|\bml\b|artificial\s*intelligence|\bai\b|deep\s*learning|nlp|analitik|analytics/.test(title)) return "Data Science";
+  if (/\biot\b|internet\s*of\s*things|hardware|sensor|robot|embedded/.test(title)) return "IoT";
+  if (/\bqa\b|quality\s*assurance|tester|testing/.test(title)) return "QA";
+  if (/mobile|android|flutter|ios/.test(title)) return "Mobile Developer";
+  if (/web|frontend|front-end|backend|back-end|fullstack|full-stack/.test(title)) return "Web Developer";
+  return null;
+}
+
 function buildResolvedProjectRoleSql({
   studentIdExpr,
   userIdExpr,
@@ -71,6 +88,32 @@ function buildResolvedProjectRoleSql({
           ELSE BTRIM(rd_pri.name)
         END,
         CASE
+          WHEN LOWER(COALESCE(rp_cur.title, rp_cur.short_title, '')) LIKE '%creative%'
+            OR LOWER(COALESCE(rp_cur.title, rp_cur.short_title, '')) LIKE '%konten%'
+            OR LOWER(COALESCE(rp_cur.title, rp_cur.short_title, '')) LIKE '%desain%'
+            THEN 'Creative Content'
+          WHEN LOWER(COALESCE(rp_cur.title, rp_cur.short_title, '')) LIKE '%social media%'
+            OR LOWER(COALESCE(rp_cur.title, rp_cur.short_title, '')) LIKE '%sosial media%'
+            THEN 'Sosial Media'
+          WHEN LOWER(COALESCE(rp_cur.title, rp_cur.short_title, '')) LIKE '%data%'
+            OR LOWER(COALESCE(rp_cur.title, rp_cur.short_title, '')) LIKE '%machine learning%'
+            OR LOWER(COALESCE(rp_cur.title, rp_cur.short_title, '')) LIKE '%analitik%'
+            THEN 'Data Science'
+          WHEN LOWER(COALESCE(rp_cur.title, rp_cur.short_title, '')) LIKE '%iot%'
+            OR LOWER(COALESCE(rp_cur.title, rp_cur.short_title, '')) LIKE '%sensor%'
+            OR LOWER(COALESCE(rp_cur.title, rp_cur.short_title, '')) LIKE '%hardware%'
+            THEN 'IoT'
+          WHEN LOWER(COALESCE(rp_cur.title, rp_cur.short_title, '')) LIKE '%qa%'
+            OR LOWER(COALESCE(rp_cur.title, rp_cur.short_title, '')) LIKE '%testing%'
+            OR LOWER(COALESCE(rp_cur.title, rp_cur.short_title, '')) LIKE '%quality%'
+            THEN 'QA'
+          WHEN LOWER(COALESCE(rp_cur.title, rp_cur.short_title, '')) LIKE '%mobile%'
+            OR LOWER(COALESCE(rp_cur.title, rp_cur.short_title, '')) LIKE '%android%'
+            OR LOWER(COALESCE(rp_cur.title, rp_cur.short_title, '')) LIKE '%flutter%'
+            THEN 'Mobile Developer'
+          ELSE NULL
+        END,
+        CASE
           WHEN LOWER(BTRIM(COALESCE(rm_cur.peran, ''))) IN (${SQL_GENERIC_ROLES_LIST}) THEN NULL
           ELSE BTRIM(rm_cur.peran)
         END,
@@ -85,6 +128,8 @@ function buildResolvedProjectRoleSql({
         'Web Developer'
       )
       FROM (SELECT 1) AS _seed
+      LEFT JOIN research_projects rp_cur
+        ON rp_cur.id = ${projectIdExpr}
       LEFT JOIN research_memberships rm_cur
         ON rm_cur.user_id = ${userIdExpr}
        AND rm_cur.project_id = ${projectIdExpr}
@@ -362,6 +407,111 @@ async function executeRoleRecoveryQueries() {
             )
           )
       `).catch(() => {});
+
+      // 9. Recover specific roles for projects based on project title (e.g. Creative and Social Media -> Creative Content / Sosial Media)
+      await pool.query(`
+        UPDATE research_memberships rm
+        SET peran = CASE
+              WHEN LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%creative%'
+                OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%konten%'
+                OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%desain%'
+                THEN 'Creative Content'
+              WHEN LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%social media%'
+                OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%sosial media%'
+                THEN 'Sosial Media'
+              WHEN LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%data%'
+                OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%machine learning%'
+                OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%analitik%'
+                THEN 'Data Science'
+              WHEN LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%iot%'
+                OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%sensor%'
+                OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%hardware%'
+                THEN 'IoT'
+              WHEN LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%qa%'
+                OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%testing%'
+                OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%quality%'
+                THEN 'QA'
+              WHEN LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%mobile%'
+                OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%android%'
+                OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%flutter%'
+                THEN 'Mobile Developer'
+              ELSE rm.peran
+            END
+        FROM research_projects rp
+        WHERE rp.id = rm.project_id
+          AND rm.member_type = 'Mahasiswa'
+          AND (
+            LOWER(BTRIM(COALESCE(rm.peran, ''))) IN (${SQL_GENERIC_ROLES_LIST})
+            OR (
+              LOWER(BTRIM(COALESCE(rm.peran, ''))) = 'web developer'
+              AND (
+                LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%creative%'
+                OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%social media%'
+                OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%sosial media%'
+                OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%konten%'
+                OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%desain%'
+              )
+            )
+          )
+      `).catch(() => {});
+
+      // 10. Heal final activity case project snapshots that erroneously have 'Web Developer' on Creative / Social Media projects
+      await pool.query(`
+        UPDATE dc_final_activity_case_projects cp
+        SET project_snapshot = jsonb_set(
+          cp.project_snapshot,
+          '{role}',
+          to_jsonb(
+            CASE
+              WHEN LOWER(COALESCE(cp.project_snapshot->>'title', '')) LIKE '%creative%'
+                OR LOWER(COALESCE(cp.project_snapshot->>'title', '')) LIKE '%konten%'
+                OR LOWER(COALESCE(cp.project_snapshot->>'title', '')) LIKE '%desain%'
+                THEN 'Creative Content'::text
+              WHEN LOWER(COALESCE(cp.project_snapshot->>'title', '')) LIKE '%social media%'
+                OR LOWER(COALESCE(cp.project_snapshot->>'title', '')) LIKE '%sosial media%'
+                THEN 'Sosial Media'::text
+              ELSE 'Creative Content'::text
+            END
+          )
+        ),
+        updated_at = NOW()
+        WHERE (
+          LOWER(COALESCE(cp.project_snapshot->>'title', '')) LIKE '%creative%'
+          OR LOWER(COALESCE(cp.project_snapshot->>'title', '')) LIKE '%social media%'
+          OR LOWER(COALESCE(cp.project_snapshot->>'title', '')) LIKE '%sosial media%'
+        )
+        AND LOWER(BTRIM(COALESCE(cp.project_snapshot->>'role', ''))) IN (${SQL_GENERIC_ROLES_LIST}, 'web developer')
+      `).catch(() => {});
+
+      // 11. Heal certificate participant role in dc_official_document_students to match snapshot role
+      await pool.query(`
+        UPDATE dc_official_document_students ods
+        SET participant_role = cp.project_snapshot->>'role'
+        FROM dc_final_activity_case_projects cp
+        WHERE ods.document_id = cp.certificate_document_id
+          AND cp.project_snapshot->>'role' IS NOT NULL
+          AND LOWER(BTRIM(cp.project_snapshot->>'role')) NOT IN (${SQL_GENERIC_ROLES_LIST}, 'web developer')
+          AND (ods.participant_role IS DISTINCT FROM (cp.project_snapshot->>'role') OR LOWER(BTRIM(COALESCE(ods.participant_role, ''))) IN (${SQL_GENERIC_ROLES_LIST}, 'web developer'))
+      `).catch(() => {});
+
+      // 12. Heal completion letter participant role in dc_official_document_students to match first project snapshot role
+      await pool.query(`
+        UPDATE dc_official_document_students ods
+        SET participant_role = primary_p.role
+        FROM dc_final_activity_cases c
+        JOIN LATERAL (
+          SELECT cp.project_snapshot->>'role' AS role,
+                 cp.project_snapshot->>'title' AS title
+          FROM dc_final_activity_case_projects cp
+          WHERE cp.final_activity_case_id = c.id
+          ORDER BY cp.display_order ASC
+          LIMIT 1
+        ) primary_p ON TRUE
+        WHERE ods.document_id = c.completion_document_id
+          AND primary_p.role IS NOT NULL
+          AND LOWER(BTRIM(primary_p.role)) NOT IN (${SQL_GENERIC_ROLES_LIST}, 'web developer')
+          AND (ods.participant_role IS DISTINCT FROM primary_p.role OR LOWER(BTRIM(COALESCE(ods.participant_role, ''))) IN (${SQL_GENERIC_ROLES_LIST}, 'web developer'))
+      `).catch(() => {});
 }
 
 async function ensureSpecificStudentResearchRoles() {
@@ -384,6 +534,7 @@ module.exports = {
   GENERIC_ROLE_VALUES,
   SQL_GENERIC_ROLES_LIST,
   isGenericOrAlumniRole,
+  inferRoleFromProjectTitle,
   pickBestResolvedRole,
   buildResolvedProjectRoleSql,
   ensureSpecificStudentResearchRoles,

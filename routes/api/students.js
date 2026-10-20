@@ -356,7 +356,35 @@ async function syncStudentResearchMemberships({ userId, studentStatus = null, re
     SELECT selected.project_id,
            $1,
            'Mahasiswa',
-           COALESCE(NULLIF(BTRIM(COALESCE(selected.peran, '')), ''), 'Web Developer'),
+           COALESCE(
+             NULLIF(BTRIM(COALESCE(selected.peran, '')), ''),
+             CASE
+               WHEN LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%creative%'
+                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%konten%'
+                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%desain%'
+                 THEN 'Creative Content'
+               WHEN LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%social media%'
+                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%sosial media%'
+                 THEN 'Sosial Media'
+               WHEN LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%data%'
+                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%machine learning%'
+                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%analitik%'
+                 THEN 'Data Science'
+               WHEN LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%iot%'
+                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%sensor%'
+                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%hardware%'
+                 THEN 'IoT'
+               WHEN LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%qa%'
+                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%testing%'
+                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%quality%'
+                 THEN 'QA'
+               WHEN LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%mobile%'
+                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%android%'
+                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%flutter%'
+                 THEN 'Mobile Developer'
+               ELSE 'Web Developer'
+             END
+           ),
            CASE
              WHEN $6::text = 'Alumni' THEN 'Nonaktif'
              WHEN selected.selesai IS NOT NULL AND selected.selesai < CURRENT_DATE THEN 'Nonaktif'
@@ -365,11 +393,13 @@ async function syncStudentResearchMemberships({ userId, studentStatus = null, re
            selected.bergabung,
            selected.selesai
     FROM UNNEST($2::text[], $3::date[], $4::date[], $5::text[]) AS selected(project_id, bergabung, selesai, peran)
+    LEFT JOIN research_projects rp ON rp.id = selected.project_id
     ON CONFLICT (project_id, user_id)
     DO UPDATE SET member_type = EXCLUDED.member_type,
                   peran = COALESCE(
                     CASE WHEN LOWER(BTRIM(COALESCE(EXCLUDED.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(EXCLUDED.peran) END,
                     CASE WHEN LOWER(BTRIM(COALESCE(research_memberships.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(research_memberships.peran) END,
+                    EXCLUDED.peran,
                     'Web Developer'
                   ),
                   status = EXCLUDED.status,

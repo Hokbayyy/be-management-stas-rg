@@ -18,7 +18,8 @@ const {
 } = require("./documentCenterStorage");
 const {
   pickBestResolvedRole,
-  buildResolvedProjectRoleSql
+  buildResolvedProjectRoleSql,
+  inferRoleFromProjectTitle
 } = require("./studentResearchRoleResolver");
 
 const TEMPLATE_KEY = "completion_letter_completed_internship";
@@ -364,8 +365,19 @@ function buildProjectSummary(projectSnapshots) {
   }
   const titles = normalized.map(projectTitleFromSnapshot);
   const roles = normalized
-    .map((snapshot) => optionalSafeText(snapshot?.role || snapshot?.position))
-    .filter((r) => r && !["alumni", "anggota", "anggota riset", "peserta magang", "mahasiswa", "peserta"].includes(r.toLowerCase()));
+    .map((snapshot) => {
+      const raw = optionalSafeText(snapshot?.role || snapshot?.position);
+      const title = snapshot?.title || snapshot?.name || snapshot?.shortTitle || "";
+      const inferred = inferRoleFromProjectTitle(title);
+      if (!raw || ["alumni", "anggota", "anggota riset", "peserta magang", "mahasiswa", "peserta"].includes(raw.toLowerCase())) {
+        return inferred || null;
+      }
+      if (raw.toLowerCase() === "web developer" && inferred && inferred.toLowerCase() !== "web developer") {
+        return inferred;
+      }
+      return raw;
+    })
+    .filter(Boolean);
   const uniqueRoles = [...new Set(roles)];
   return {
     title: titles.join(", "),
@@ -612,10 +624,15 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
     if (projectResult.rowCount < 1) throw httpError(409, "Surat hanya dapat dibuat untuk case yang memiliki project.");
     const projectRows = [];
     for (const row of projectResult.rows) {
-      const snapshotRole = typeof row.project_snapshot?.role === "string" ? row.project_snapshot.role.trim() : "";
+      let snapshotRole = typeof row.project_snapshot?.role === "string" ? row.project_snapshot.role.trim() : "";
       const resolvedRole = typeof row.resolved_project_role === "string" ? row.resolved_project_role.trim() : "";
+      const projectTitle = row.project_snapshot?.title || row.project_snapshot?.shortTitle || "";
+      const inferredRole = inferRoleFromProjectTitle(projectTitle);
+      if (snapshotRole.toLowerCase() === "web developer" && inferredRole && inferredRole.toLowerCase() !== "web developer") {
+        snapshotRole = inferredRole;
+      }
       const targetRole = pickBestResolvedRole(resolvedRole, snapshotRole);
-      if (targetRole && snapshotRole !== targetRole) {
+      if (targetRole && (row.project_snapshot?.role !== targetRole)) {
         const nextSnapshot = { ...(row.project_snapshot || {}), role: targetRole };
         await client.query(
           "UPDATE dc_final_activity_case_projects SET project_snapshot = $2::jsonb, updated_at = NOW() WHERE id = $1",

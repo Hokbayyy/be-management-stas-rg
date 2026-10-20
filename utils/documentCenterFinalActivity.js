@@ -24,6 +24,7 @@ const {
 const {
   SQL_GENERIC_ROLES_LIST,
   isGenericOrAlumniRole,
+  inferRoleFromProjectTitle,
   pickBestResolvedRole,
   buildResolvedProjectRoleSql,
   ensureSpecificStudentResearchRoles,
@@ -165,9 +166,31 @@ function mapCaseRow(row) {
 }
 
 function mapProjectRow(row) {
-  const snapshotRole = typeof row.project_snapshot?.role === "string" ? row.project_snapshot.role.trim() : "";
+  let snapshotRole = typeof row.project_snapshot?.role === "string" ? row.project_snapshot.role.trim() : "";
+  const dmRole = typeof row.datamahasiswa_peran === "string" ? row.datamahasiswa_peran.trim() : "";
+  const dmDiv = typeof row.datamahasiswa_division === "string" ? row.datamahasiswa_division.trim() : "";
   const fallbackRole = typeof row.resolved_project_role === "string" ? row.resolved_project_role.trim() : "";
-  const resolvedRole = pickBestResolvedRole(fallbackRole, snapshotRole);
+  const title = row.project_snapshot?.title || row.resolved_project_title || "";
+  const inferredRole = inferRoleFromProjectTitle(title, dmDiv);
+  if (snapshotRole.toLowerCase() === "web developer" && inferredRole && inferredRole.toLowerCase() !== "web developer") {
+    snapshotRole = inferredRole;
+  }
+  let resolvedRole = "";
+  if (dmRole && !isGenericOrAlumniRole(dmRole)) {
+    resolvedRole = (dmRole.toLowerCase() === "web developer" && inferredRole && inferredRole.toLowerCase() !== "web developer")
+      ? inferredRole
+      : dmRole;
+  } else if (dmDiv && !isGenericOrAlumniRole(dmDiv)) {
+    resolvedRole = dmDiv;
+  } else if (snapshotRole && !isGenericOrAlumniRole(snapshotRole)) {
+    resolvedRole = snapshotRole;
+  } else if (fallbackRole && !isGenericOrAlumniRole(fallbackRole)) {
+    resolvedRole = fallbackRole;
+  } else if (inferredRole) {
+    resolvedRole = inferredRole;
+  } else {
+    resolvedRole = "Web Developer";
+  }
   return {
     id: row.id,
     project: {
@@ -225,9 +248,32 @@ function buildPeriodSnapshot(row) {
 }
 
 function buildProjectSnapshot(row) {
-  const rmRole = typeof row.project_role === "string" ? row.project_role.trim() : "";
-  const gspRole = typeof row.graduation_position_label === "string" ? row.graduation_position_label.trim() : "";
-  const role = pickBestResolvedRole(rmRole, gspRole);
+  const dmRole = typeof row.datamahasiswa_peran === "string" ? row.datamahasiswa_peran.trim() : "";
+  const dmDiv = typeof row.datamahasiswa_division === "string" ? row.datamahasiswa_division.trim() : "";
+  let rmRole = typeof row.project_role === "string" ? row.project_role.trim() : "";
+  let gspRole = typeof row.graduation_position_label === "string" ? row.graduation_position_label.trim() : "";
+  const projectTitle = row.project_title || row.project_short_title || "";
+  const inferredRole = inferRoleFromProjectTitle(projectTitle);
+
+  let role = null;
+  if (dmRole && !isGenericOrAlumniRole(dmRole)) {
+    if (dmRole.toLowerCase() === "web developer" && inferredRole && inferredRole.toLowerCase() !== "web developer") {
+      role = inferredRole;
+    } else {
+      role = dmRole;
+    }
+  } else if (dmDiv && !isGenericOrAlumniRole(dmDiv)) {
+    role = dmDiv;
+  } else if (gspRole && !isGenericOrAlumniRole(gspRole)) {
+    role = gspRole;
+  } else if (rmRole && !isGenericOrAlumniRole(rmRole)) {
+    role = rmRole;
+  } else if (inferredRole) {
+    role = inferredRole;
+  } else {
+    role = "Web Developer";
+  }
+
   return {
     legacyProjectId: row.project_id,
     title: row.project_title,
@@ -308,6 +354,8 @@ async function loadEligibleProjects(client, studentId) {
            rp.title AS project_title, rp.short_title AS project_short_title,
            rp.period_text AS project_period_text, rp.status AS project_status,
            rm.status AS membership_status,
+           rm.peran AS datamahasiswa_peran,
+           rd.name AS datamahasiswa_division,
            ${buildResolvedProjectRoleSql({
              studentIdExpr: "s.id",
              userIdExpr: "s.user_id",
@@ -320,6 +368,8 @@ async function loadEligibleProjects(client, studentId) {
     JOIN research_memberships rm
       ON rm.user_id = s.user_id
      AND rm.member_type = 'Mahasiswa'
+    LEFT JOIN research_divisions rd
+      ON rd.id = rm.division_id
     JOIN research_projects rp ON rp.id = rm.project_id
     LEFT JOIN graduation_submission_projects gsp
       ON gsp.student_id = s.id
@@ -1484,6 +1534,33 @@ async function queryCaseProjectsWithResolvedRole(caseId) {
   return pool.query(
     `
     SELECT cp.*,
+           (
+             SELECT BTRIM(rm.peran)
+             FROM dc_final_activity_cases c
+             JOIN students s ON s.id = c.legacy_student_id
+             JOIN research_memberships rm
+               ON rm.user_id = s.user_id
+              AND (rm.project_id = cp.legacy_project_id OR cp.legacy_project_id IS NULL)
+              AND rm.member_type = 'Mahasiswa'
+              AND NULLIF(BTRIM(rm.peran), '') IS NOT NULL
+             WHERE c.id = cp.final_activity_case_id
+             ORDER BY CASE WHEN rm.project_id = cp.legacy_project_id THEN 0 ELSE 1 END, rm.id ASC
+             LIMIT 1
+           ) AS datamahasiswa_peran,
+           (
+             SELECT BTRIM(rd.name)
+             FROM dc_final_activity_cases c
+             JOIN students s ON s.id = c.legacy_student_id
+             JOIN research_memberships rm
+               ON rm.user_id = s.user_id
+              AND (rm.project_id = cp.legacy_project_id OR cp.legacy_project_id IS NULL)
+              AND rm.member_type = 'Mahasiswa'
+             JOIN research_divisions rd ON rd.id = rm.division_id
+             WHERE c.id = cp.final_activity_case_id
+               AND NULLIF(BTRIM(rd.name), '') IS NOT NULL
+             ORDER BY CASE WHEN rm.project_id = cp.legacy_project_id THEN 0 ELSE 1 END, rm.id ASC
+             LIMIT 1
+           ) AS datamahasiswa_division,
            COALESCE(
              (
                SELECT ${buildResolvedProjectRoleSql({
@@ -1555,8 +1632,25 @@ async function detailCase(id) {
   let projects = await queryCaseProjectsWithResolvedRole(caseId);
   const needsAlumniHeal = projects.rows.some((row) => {
     const snapshotRole = typeof row.project_snapshot?.role === "string" ? row.project_snapshot.role.trim() : "";
+    const dmRole = typeof row.datamahasiswa_peran === "string" ? row.datamahasiswa_peran.trim() : "";
+    const dmDiv = typeof row.datamahasiswa_division === "string" ? row.datamahasiswa_division.trim() : "";
     const resolvedRole = typeof row.resolved_project_role === "string" ? row.resolved_project_role.trim() : "";
-    const targetRole = pickBestResolvedRole(resolvedRole, snapshotRole);
+    const projectTitle = row.project_snapshot?.title || row.resolved_project_title || "";
+    const inferredRole = inferRoleFromProjectTitle(projectTitle, dmDiv);
+
+    let targetRole = "";
+    if (dmRole && !isGenericOrAlumniRole(dmRole)) {
+      targetRole = (dmRole.toLowerCase() === "web developer" && inferredRole && inferredRole.toLowerCase() !== "web developer")
+        ? inferredRole
+        : dmRole;
+    } else if (dmDiv && !isGenericOrAlumniRole(dmDiv)) {
+      targetRole = dmDiv;
+    } else {
+      const candidate = pickBestResolvedRole(resolvedRole, snapshotRole);
+      targetRole = (candidate.toLowerCase() === "web developer" && inferredRole && inferredRole.toLowerCase() !== "web developer")
+        ? inferredRole
+        : candidate;
+    }
     return Boolean(targetRole) && snapshotRole !== targetRole;
   });
   if (needsAlumniHeal) {
@@ -1907,6 +2001,29 @@ async function updateFinalActivityDynamicData({ id, body, authUser, ip }) {
 
     const projectResult = await client.query(
       `SELECT cp.*,
+              (
+                SELECT BTRIM(rm.peran)
+                FROM students s
+                JOIN research_memberships rm ON rm.user_id = s.user_id
+                WHERE s.id = $2
+                  AND (rm.project_id = cp.legacy_project_id OR cp.legacy_project_id IS NULL)
+                  AND rm.member_type = 'Mahasiswa'
+                  AND NULLIF(BTRIM(rm.peran), '') IS NOT NULL
+                ORDER BY CASE WHEN rm.project_id = cp.legacy_project_id THEN 0 ELSE 1 END, rm.id ASC
+                LIMIT 1
+              ) AS datamahasiswa_peran,
+              (
+                SELECT BTRIM(rd.name)
+                FROM students s
+                JOIN research_memberships rm ON rm.user_id = s.user_id
+                JOIN research_divisions rd ON rd.id = rm.division_id
+                WHERE s.id = $2
+                  AND (rm.project_id = cp.legacy_project_id OR cp.legacy_project_id IS NULL)
+                  AND rm.member_type = 'Mahasiswa'
+                  AND NULLIF(BTRIM(rd.name), '') IS NOT NULL
+                ORDER BY CASE WHEN rm.project_id = cp.legacy_project_id THEN 0 ELSE 1 END, rm.id ASC
+                LIMIT 1
+              ) AS datamahasiswa_division,
               COALESCE(
                 (
                   SELECT ${buildResolvedProjectRoleSql({
@@ -1927,15 +2044,41 @@ async function updateFinalActivityDynamicData({ id, body, authUser, ip }) {
       [caseId, caseRow.legacy_student_id]
     );
     if (!projectResult.rowCount) throw httpError(409, "Case belum memiliki project.");
-    let projectRows = projectResult.rows.map((row) => {
-      const snapshotRole = typeof row.project_snapshot?.role === "string" ? row.project_snapshot.role.trim() : "";
+    let projectRows = [];
+    for (const row of projectResult.rows) {
+      let snapshotRole = typeof row.project_snapshot?.role === "string" ? row.project_snapshot.role.trim() : "";
+      const dmRole = typeof row.datamahasiswa_peran === "string" ? row.datamahasiswa_peran.trim() : "";
+      const dmDiv = typeof row.datamahasiswa_division === "string" ? row.datamahasiswa_division.trim() : "";
       const resolvedRole = typeof row.resolved_project_role === "string" ? row.resolved_project_role.trim() : "";
-      const bestRole = pickBestResolvedRole(resolvedRole, snapshotRole);
-      if (bestRole && bestRole !== snapshotRole) {
-        return { ...row, project_snapshot: { ...(row.project_snapshot || {}), role: bestRole } };
+      const projectTitle = row.project_snapshot?.title || row.project_snapshot?.shortTitle || "";
+      const inferredRole = inferRoleFromProjectTitle(projectTitle, dmDiv);
+      if (snapshotRole.toLowerCase() === "web developer" && inferredRole && inferredRole.toLowerCase() !== "web developer") {
+        snapshotRole = inferredRole;
       }
-      return row;
-    });
+      let bestRole = "";
+      if (dmRole && !isGenericOrAlumniRole(dmRole)) {
+        bestRole = (dmRole.toLowerCase() === "web developer" && inferredRole && inferredRole.toLowerCase() !== "web developer")
+          ? inferredRole
+          : dmRole;
+      } else if (dmDiv && !isGenericOrAlumniRole(dmDiv)) {
+        bestRole = dmDiv;
+      } else {
+        const candidate = pickBestResolvedRole(resolvedRole, snapshotRole);
+        bestRole = (candidate.toLowerCase() === "web developer" && inferredRole && inferredRole.toLowerCase() !== "web developer")
+          ? inferredRole
+          : (candidate || inferredRole || (caseRow.activity_type === "Riset" ? "Peneliti" : "Web Developer"));
+      }
+      if (bestRole && bestRole !== row.project_snapshot?.role) {
+        const nextSnapshot = { ...(row.project_snapshot || {}), role: bestRole };
+        await client.query(
+          "UPDATE dc_final_activity_case_projects SET project_snapshot=$2::jsonb, updated_at=NOW() WHERE id=$1",
+          [row.id, JSON.stringify(nextSnapshot)]
+        );
+        projectRows.push({ ...row, project_snapshot: nextSnapshot });
+      } else {
+        projectRows.push(row);
+      }
+    }
 
     const nextStudent = applyDefined(caseRow.student_snapshot, parsed.student);
     const nextPeriod = applyDefined(caseRow.period_snapshot, parsed.period);
@@ -2066,6 +2209,29 @@ async function healCaseAlumniRoleByCaseId(caseId, { forceSyncFromStudent = false
     const caseRow = caseResult.rows[0];
     const projectResult = await client.query(
       `SELECT cp.*,
+              (
+                SELECT BTRIM(rm.peran)
+                FROM students s
+                JOIN research_memberships rm ON rm.user_id = s.user_id
+                WHERE s.id = $2
+                  AND (rm.project_id = cp.legacy_project_id OR cp.legacy_project_id IS NULL)
+                  AND rm.member_type = 'Mahasiswa'
+                  AND NULLIF(BTRIM(rm.peran), '') IS NOT NULL
+                ORDER BY CASE WHEN rm.project_id = cp.legacy_project_id THEN 0 ELSE 1 END, rm.id ASC
+                LIMIT 1
+              ) AS datamahasiswa_peran,
+              (
+                SELECT BTRIM(rd.name)
+                FROM students s
+                JOIN research_memberships rm ON rm.user_id = s.user_id
+                JOIN research_divisions rd ON rd.id = rm.division_id
+                WHERE s.id = $2
+                  AND (rm.project_id = cp.legacy_project_id OR cp.legacy_project_id IS NULL)
+                  AND rm.member_type = 'Mahasiswa'
+                  AND NULLIF(BTRIM(rd.name), '') IS NOT NULL
+                ORDER BY CASE WHEN rm.project_id = cp.legacy_project_id THEN 0 ELSE 1 END, rm.id ASC
+                LIMIT 1
+              ) AS datamahasiswa_division,
               COALESCE(
                 (
                   SELECT ${buildResolvedProjectRoleSql({
@@ -2125,14 +2291,35 @@ async function healCaseAlumniRoleByCaseId(caseId, { forceSyncFromStudent = false
     let updatedAny = false;
     const projectRows = [];
     for (const row of projectResult.rows) {
+      const dmRole = typeof row.datamahasiswa_peran === "string" ? row.datamahasiswa_peran.trim() : "";
+      const dmDiv = typeof row.datamahasiswa_division === "string" ? row.datamahasiswa_division.trim() : "";
       const snapshotRole = typeof row.project_snapshot?.role === "string" ? row.project_snapshot.role.trim() : "";
       const resolvedRole = typeof row.resolved_project_role === "string" ? row.resolved_project_role.trim() : "";
       const snapshotTitle = typeof row.project_snapshot?.title === "string" ? row.project_snapshot.title.trim() : "";
       const resolvedTitle = typeof row.resolved_project_title === "string" ? row.resolved_project_title.trim() : "";
       const resolvedShortTitle = typeof row.resolved_project_short_title === "string" ? row.resolved_project_short_title.trim() : "";
-      const targetRole = forceSyncFromStudent && !isGenericOrAlumniRole(resolvedRole)
-        ? resolvedRole
-        : pickBestResolvedRole(resolvedRole, snapshotRole);
+      const projectTitle = resolvedTitle || snapshotTitle;
+      const inferredRole = inferRoleFromProjectTitle(projectTitle, dmDiv);
+
+      let targetRole = "";
+      if (dmRole && !isGenericOrAlumniRole(dmRole)) {
+        if (dmRole.toLowerCase() === "web developer" && inferredRole && inferredRole.toLowerCase() !== "web developer") {
+          targetRole = inferredRole;
+        } else {
+          targetRole = dmRole;
+        }
+      } else if (dmDiv && !isGenericOrAlumniRole(dmDiv)) {
+        targetRole = dmDiv;
+      } else if (forceSyncFromStudent && !isGenericOrAlumniRole(resolvedRole)) {
+        targetRole = resolvedRole;
+      } else {
+        const candidate = pickBestResolvedRole(resolvedRole, snapshotRole);
+        if (candidate.toLowerCase() === "web developer" && inferredRole && inferredRole.toLowerCase() !== "web developer") {
+          targetRole = inferredRole;
+        } else {
+          targetRole = candidate || inferredRole || (caseRow.activity_type === "Riset" ? "Peneliti" : "Web Developer");
+        }
+      }
       const shouldUpdateRole = Boolean(targetRole) && snapshotRole !== targetRole;
       const shouldUpdateTitle = Boolean(resolvedTitle) && (
         !snapshotTitle ||
