@@ -333,14 +333,110 @@ test("UAT RBAC End-to-End HTTP Integration Suite on localhost:3333", async (t) =
   });
 
   // =========================================================================
-  // 9. Unauthorized Access Protections
+  // 9. Unified Role Management V2 (Discovery, Import, Replace & Archive)
   // =========================================================================
-  await t.test("20. Unauthenticated request without cookie returns 401", async () => {
+  let importedRoleId = null;
+  let targetReplacementRoleId = null;
+
+  await t.test("20. Discover role sources from research memberships", async () => {
+    const res = await apiRequest("/rbac/roles/discovery");
+    assert.equal(res.status, 200);
+    assert.ok(Array.isArray(res.data.sources));
+  });
+
+  await t.test("21. Import descriptive role with zero initial permissions", async () => {
+    const timestamp = Date.now();
+    const res = await apiRequest("/rbac/roles/import", {
+      method: "POST",
+      body: {
+        sourcePeran: "Frontend Developer",
+        code: `FE_DEV_${timestamp}`,
+        name: `Frontend Developer ${timestamp}`,
+        category: "FUNCTIONAL"
+      }
+    });
+
+    assert.equal(res.status, 201);
+    assert.equal(res.data.data.category, "FUNCTIONAL");
+    assert.equal(res.data.data.isSystem, false);
+    importedRoleId = res.data.data.id;
+  });
+
+  await t.test("22. Query Context Roles with category & scope filters", async () => {
+    const res = await apiRequest("/rbac/context-roles?category=SYSTEM&scopeType=PROJECT");
+    assert.equal(res.status, 200);
+    assert.ok(Array.isArray(res.data));
+    for (const r of res.data) {
+      assert.equal(r.category, "SYSTEM");
+    }
+  });
+
+  await t.test("23. Role Retirement Impact Preview", async () => {
+    assert.ok(importedRoleId);
+    const targetRoleRes = await apiRequest("/rbac/roles", {
+      method: "POST",
+      body: {
+        code: `TARGET_REPL_${Date.now()}`,
+        name: `Target Replacement ${Date.now()}`,
+        category: "FUNCTIONAL",
+        allowedScopeTypes: ["PROJECT"]
+      }
+    });
+    assert.equal(targetRoleRes.status, 201);
+    targetReplacementRoleId = targetRoleRes.data.data.id;
+
+    // Assign imported role to Student 2
+    await apiRequest("/rbac/students/STD-UAT-2/role-assignments", {
+      method: "POST",
+      body: {
+        roleId: importedRoleId,
+        scopeType: "PROJECT",
+        scopeId: "PRJ-UAT-RBAC-1"
+      }
+    });
+
+    const res = await apiRequest(`/rbac/roles/${importedRoleId}/retirement-impact?replacementRoleId=${targetReplacementRoleId}`);
+    assert.equal(res.status, 200);
+    assert.equal(res.data.activeAssignmentsCount, 1);
+    assert.equal(res.data.canProceed, true);
+    assert.deepEqual(res.data.blockingIssues, []);
+  });
+
+  await t.test("24. Replace and Archive Role via HTTP", async () => {
+    assert.ok(importedRoleId);
+    assert.ok(targetReplacementRoleId);
+
+    // Get source role to fetch its version
+    const sourceRes = await apiRequest(`/rbac/roles/${importedRoleId}`);
+    assert.equal(sourceRes.status, 200);
+
+    const res = await apiRequest(`/rbac/roles/${importedRoleId}/replace-and-archive`, {
+      method: "POST",
+      body: {
+        replacementRoleId: targetReplacementRoleId,
+        sourceVersion: sourceRes.data.version,
+        reason: "HTTP UAT replace and archive verification",
+        migrateMembershipLabels: false
+      }
+    });
+
+    assert.equal(res.status, 200);
+    assert.equal(res.data.data.migratedAssignmentsCount, 1);
+
+    // Verify source role is now archived
+    const checkArchived = await apiRequest(`/rbac/roles/${importedRoleId}`);
+    assert.equal(checkArchived.data.isActive, false);
+  });
+
+  // =========================================================================
+  // 10. Unauthorized Access Protections
+  // =========================================================================
+  await t.test("25. Unauthenticated request without cookie returns 401", async () => {
     const res = await apiRequest("/rbac/me", { cookie: null });
     assert.equal(res.status, 401);
   });
 
-  await t.test("21. Student account cannot perform operator actions (returns 403)", async () => {
+  await t.test("26. Student account cannot perform operator actions (returns 403)", async () => {
     const loginRes = await apiRequest("/auth/login", {
       method: "POST",
       body: {

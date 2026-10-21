@@ -1141,14 +1141,20 @@ CREATE TABLE IF NOT EXISTS rbac_roles (
   code VARCHAR(50) UNIQUE NOT NULL,
   name VARCHAR(100) NOT NULL,
   description TEXT,
+  category VARCHAR(30) NOT NULL DEFAULT 'FUNCTIONAL' CHECK (category IN ('SYSTEM', 'FUNCTIONAL', 'DIVISION')),
+  allowed_scope_types TEXT[] NOT NULL DEFAULT '{"LAB","PROJECT","DIVISION"}',
   is_system BOOLEAN NOT NULL DEFAULT FALSE,
+  is_protected BOOLEAN NOT NULL DEFAULT FALSE,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  archived_at TIMESTAMPTZ,
   version INTEGER NOT NULL DEFAULT 1,
   created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_rbac_roles_active_code ON rbac_roles(is_active, code);
+CREATE INDEX IF NOT EXISTS idx_rbac_roles_category ON rbac_roles(category);
+CREATE INDEX IF NOT EXISTS idx_rbac_roles_active_category ON rbac_roles(is_active, category);
 
 -- 18. rbac_permissions
 CREATE TABLE IF NOT EXISTS rbac_permissions (

@@ -22,7 +22,11 @@ const {
   listRbacAuditLogs,
   listLegacyReconciliations,
   reconcileLegacyRole,
-  listContextRoles
+  listContextRoles,
+  discoverRoleSources,
+  importRoleDefinition,
+  getRoleRetirementImpact,
+  replaceAndArchiveRole
 } = require("../../utils/rbacService");
 
 const router = express.Router();
@@ -125,8 +129,8 @@ router.post(
 router.get(
   "/context-roles",
   asyncHandler(async (req, res) => {
-    const { scopeType } = req.query;
-    const roles = await listContextRoles({ scopeType });
+    const { scopeType, category } = req.query;
+    const roles = await listContextRoles({ scopeType, category });
     res.json(roles);
   })
 );
@@ -139,9 +143,8 @@ router.get(
   "/roles",
   asyncHandler(async (req, res) => {
     const includeArchived = req.query.includeArchived === "true";
-    const limit = req.query.limit;
-    const offset = req.query.offset;
-    const roles = await listRoles({ includeArchived, limit, offset });
+    const { category, scopeType, limit, offset } = req.query;
+    const roles = await listRoles({ includeArchived, category, scopeType, limit, offset });
     res.json(roles);
   })
 );
@@ -153,6 +156,27 @@ router.post(
     const role = await createRole(req.body, getActorContext(req));
     res.status(201).json({
       message: "Role berhasil dibuat.",
+      data: role
+    });
+  })
+);
+
+router.get(
+  "/roles/discovery",
+  requireOperator,
+  asyncHandler(async (req, res) => {
+    const discovery = await discoverRoleSources();
+    res.json(discovery);
+  })
+);
+
+router.post(
+  "/roles/import",
+  requireOperator,
+  asyncHandler(async (req, res) => {
+    const role = await importRoleDefinition(req.body, getActorContext(req));
+    res.status(201).json({
+      message: "Role fungsional berhasil diimpor ke katalog.",
       data: role
     });
   })
@@ -260,6 +284,30 @@ router.get(
     const id = requireSafeId(req.params.id);
     const impact = await getRoleImpact(id);
     res.json(impact);
+  })
+);
+
+router.get(
+  "/roles/:id/retirement-impact",
+  requireOperator,
+  asyncHandler(async (req, res) => {
+    const id = requireSafeId(req.params.id);
+    const replacementRoleId = req.query.replacementRoleId ? String(req.query.replacementRoleId).trim() : null;
+    const impact = await getRoleRetirementImpact(id, replacementRoleId);
+    res.json(impact);
+  })
+);
+
+router.post(
+  "/roles/:id/replace-and-archive",
+  requireOperator,
+  asyncHandler(async (req, res) => {
+    const id = requireSafeId(req.params.id);
+    const result = await replaceAndArchiveRole(id, req.body, getActorContext(req));
+    res.json({
+      message: "Role berhasil digantikan dan diarsipkan.",
+      data: result
+    });
   })
 );
 

@@ -182,6 +182,10 @@ const CANONICAL_ROLES = [
     code: "PROJECT_MANAGER",
     name: "Project Manager",
     description: "Memimpin manajemen riset, sprint, pembagian tugas, dan evaluasi PM.",
+    category: "SYSTEM",
+    allowedScopeTypes: ["LAB", "PROJECT"],
+    isSystem: true,
+    isProtected: true,
     permissions: [
       "research.project.read",
       "research.project.update",
@@ -201,6 +205,10 @@ const CANONICAL_ROLES = [
     code: "KETUA_RISET",
     name: "Ketua Riset",
     description: "Memimpin arah riset, pengelolaan sprint, milestone, dan anggota riset.",
+    category: "SYSTEM",
+    allowedScopeTypes: ["PROJECT"],
+    isSystem: true,
+    isProtected: true,
     permissions: [
       "research.project.read",
       "research.project.update",
@@ -218,6 +226,10 @@ const CANONICAL_ROLES = [
     code: "CORE_RESEARCHER",
     name: "Core Researcher",
     description: "Peneliti utama dengan akses pembuatan task, pengelolaan sprint, dan kolaborasi.",
+    category: "SYSTEM",
+    allowedScopeTypes: ["LAB", "PROJECT", "DIVISION"],
+    isSystem: true,
+    isProtected: true,
     permissions: [
       "research.project.read",
       "scrum.sprint.view",
@@ -231,6 +243,10 @@ const CANONICAL_ROLES = [
     code: "CONTRIBUTOR",
     name: "Contributor / Member",
     description: "Anggota riset yang berfokus pada pengerjaan tugas dan kolaborasi.",
+    category: "SYSTEM",
+    allowedScopeTypes: ["LAB", "PROJECT", "DIVISION"],
+    isSystem: true,
+    isProtected: true,
     permissions: [
       "research.project.read",
       "scrum.sprint.view",
@@ -264,13 +280,23 @@ async function ensureRbacTables(executor = query) {
       code VARCHAR(50) UNIQUE NOT NULL,
       name VARCHAR(100) NOT NULL,
       description TEXT,
+      category VARCHAR(30) NOT NULL DEFAULT 'FUNCTIONAL',
+      allowed_scope_types TEXT[] NOT NULL DEFAULT '{"LAB","PROJECT","DIVISION"}',
       is_system BOOLEAN NOT NULL DEFAULT FALSE,
+      is_protected BOOLEAN NOT NULL DEFAULT FALSE,
       is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      archived_at TIMESTAMPTZ,
       version INTEGER NOT NULL DEFAULT 1,
       created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    ALTER TABLE rbac_roles
+      ADD COLUMN IF NOT EXISTS category VARCHAR(30) NOT NULL DEFAULT 'FUNCTIONAL',
+      ADD COLUMN IF NOT EXISTS allowed_scope_types TEXT[] NOT NULL DEFAULT '{"LAB","PROJECT","DIVISION"}',
+      ADD COLUMN IF NOT EXISTS is_protected BOOLEAN NOT NULL DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
 
     CREATE TABLE IF NOT EXISTS rbac_permissions (
       id TEXT PRIMARY KEY,
@@ -372,33 +398,84 @@ async function ensureRbacTables(executor = query) {
     );
   }
 
-  // Seed canonical roles & permissions
+  // Seed canonical roles & permissions without overwriting custom metadata or restoring revoked permissions
   for (const r of CANONICAL_ROLES) {
-    await runQuery(
+    const existingRes = await runQuery(
       executor,
-      `
-      INSERT INTO rbac_roles (id, code, name, description, is_system, is_active, version)
-      VALUES ($1, $2, $3, $4, TRUE, TRUE, 1)
-      ON CONFLICT (code) DO UPDATE SET
-        name = EXCLUDED.name,
-        description = EXCLUDED.description,
-        is_system = TRUE
-      `,
-      [r.id, r.code, r.name, r.description]
+      `SELECT id, is_system FROM rbac_roles WHERE code = $1 LIMIT 1`,
+      [r.code]
     );
 
-    for (const pCode of r.permissions) {
+    let roleId = r.id;
+    let isNewRole = false;
+
+    if (existingRes.rowCount === 0) {
       await runQuery(
         executor,
         `
-        INSERT INTO rbac_role_permissions (role_id, permission_id)
-        SELECT $1, p.id
-        FROM rbac_permissions p
-        WHERE p.code = $2
-        ON CONFLICT (role_id, permission_id) DO NOTHING
+        INSERT INTO rbac_roles (id, code, name, description, category, allowed_scope_types, is_system, is_protected, is_active, version)
+        VALUES ($1, $2, $3, $4, 'SYSTEM', $5, TRUE, TRUE, TRUE, 1)
+        ON CONFLICT (code) DO NOTHING
         `,
-        [r.id, pCode]
+        [r.id, r.code, r.name, r.description, r.allowedScopeTypes || ["PROJECT"]]
       );
+      isNewRole = true;
+    } else {
+      roleId = existingRes.rows[0].id;
+      // Ensure system category, protection flags, and scope compatibility without overwriting custom name or description
+      await runQuery(
+        executor,
+        `
+        UPDATE rbac_roles
+        SET category = 'SYSTEM', is_system = TRUE, is_protected = TRUE, allowed_scope_types = $2
+        WHERE id = $1 AND (category <> 'SYSTEM' OR is_system = FALSE OR is_protected = FALSE OR allowed_scope_types <> $2)
+        `,
+        [roleId, r.allowedScopeTypes || ["PROJECT"]]
+      );
+    }
+
+    // Only seed initial default permissions if the role was just created,
+    // OR if it currently has zero permissions AND zero PERMISSIONS_UPDATED audit logs
+    if (isNewRole) {
+      for (const pCode of r.permissions) {
+        await runQuery(
+          executor,
+          `
+          INSERT INTO rbac_role_permissions (role_id, permission_id)
+          SELECT $1, p.id
+          FROM rbac_permissions p
+          WHERE p.code = $2
+          ON CONFLICT (role_id, permission_id) DO NOTHING
+          `,
+          [roleId, pCode]
+        );
+      }
+    } else {
+      const permsRes = await runQuery(
+        executor,
+        `SELECT COUNT(*)::int AS count FROM rbac_role_permissions WHERE role_id = $1`,
+        [roleId]
+      );
+      const auditRes = await runQuery(
+        executor,
+        `SELECT COUNT(*)::int AS count FROM rbac_audit_logs WHERE target_id = $1 AND action = 'PERMISSIONS_UPDATED'`,
+        [roleId]
+      );
+      if (permsRes.rows[0].count === 0 && auditRes.rows[0].count === 0) {
+        for (const pCode of r.permissions) {
+          await runQuery(
+            executor,
+            `
+            INSERT INTO rbac_role_permissions (role_id, permission_id)
+            SELECT $1, p.id
+            FROM rbac_permissions p
+            WHERE p.code = $2
+            ON CONFLICT (role_id, permission_id) DO NOTHING
+            `,
+            [roleId, pCode]
+          );
+        }
+      }
     }
   }
 
@@ -530,13 +607,21 @@ async function listPermissions(executor = query) {
 // ROLE CATALOG MANAGEMENT
 // =============================================================================
 
-async function listRoles({ includeArchived = false, limit = 50, offset = 0 } = {}, executor = query) {
+async function listRoles({ includeArchived = false, category = null, scopeType = null, limit = 50, offset = 0 } = {}, executor = query) {
   await ensureRbacTables(executor);
   const conditions = [];
   const params = [];
 
   if (!includeArchived) {
-    conditions.push("is_active = TRUE");
+    conditions.push("r.is_active = TRUE");
+  }
+  if (category) {
+    params.push(String(category).trim().toUpperCase());
+    conditions.push(`r.category = $${params.length}`);
+  }
+  if (scopeType) {
+    params.push(String(scopeType).trim().toUpperCase());
+    conditions.push(`$${params.length} = ANY(r.allowed_scope_types)`);
   }
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -568,8 +653,12 @@ function mapRoleRow(row) {
     code: row.code,
     name: row.name,
     description: row.description,
-    isSystem: row.is_system,
-    isActive: row.is_active,
+    category: row.category || "FUNCTIONAL",
+    allowedScopeTypes: row.allowed_scope_types || ["LAB", "PROJECT", "DIVISION"],
+    isSystem: Boolean(row.is_system),
+    isProtected: Boolean(row.is_protected),
+    isActive: Boolean(row.is_active),
+    archivedAt: row.archived_at || null,
     version: row.version,
     permissionCount: row.permission_count != null ? row.permission_count : undefined,
     activeAssignmentCount: row.active_assignment_count != null ? row.active_assignment_count : undefined,
@@ -638,6 +727,33 @@ async function createRole(payload = {}, actorContext = {}, executor = pool) {
     throw createHttpError("Nama role tidak boleh kosong.", 400);
   }
 
+  let category = String(payload.category || "FUNCTIONAL").trim().toUpperCase();
+  if (category === "SYSTEM") {
+    throw createHttpError("Kategori 'SYSTEM' hanya diperuntukkan bagi canonical system roles bawaan.", 400);
+  }
+  if (!["FUNCTIONAL", "DIVISION"].includes(category)) {
+    throw createHttpError("Kategori role harus salah satu dari: FUNCTIONAL, DIVISION.", 400);
+  }
+
+  let allowedScopeTypes = payload.allowedScopeTypes;
+  if (!allowedScopeTypes) {
+    allowedScopeTypes = category === "DIVISION" ? ["DIVISION"] : ["LAB", "PROJECT", "DIVISION"];
+  } else {
+    if (!Array.isArray(allowedScopeTypes) || allowedScopeTypes.length === 0) {
+      throw createHttpError("allowedScopeTypes harus berupa array of string yang tidak kosong.", 400);
+    }
+    const validScopes = ["LAB", "PROJECT", "DIVISION"];
+    allowedScopeTypes = Array.from(new Set(allowedScopeTypes.map((s) => String(s).trim().toUpperCase())));
+    for (const s of allowedScopeTypes) {
+      if (!validScopes.includes(s)) {
+        throw createHttpError(`Scope type '${s}' tidak valid. Harus salah satu dari: ${validScopes.join(", ")}.`, 400);
+      }
+    }
+    if (category === "DIVISION" && (allowedScopeTypes.length !== 1 || allowedScopeTypes[0] !== "DIVISION")) {
+      throw createHttpError("Role dengan kategori DIVISION hanya boleh mengizinkan scope DIVISION.", 400);
+    }
+  }
+
   // Check unique code
   const existing = await getRoleByCode(code, executor);
   if (existing) {
@@ -651,11 +767,11 @@ async function createRole(payload = {}, actorContext = {}, executor = pool) {
   const result = await runQuery(
     executor,
     `
-    INSERT INTO rbac_roles (id, code, name, description, is_system, is_active, version, created_by)
-    VALUES ($1, $2, $3, $4, FALSE, TRUE, 1, $5)
+    INSERT INTO rbac_roles (id, code, name, description, category, allowed_scope_types, is_system, is_protected, is_active, version, created_by)
+    VALUES ($1, $2, $3, $4, $5, $6, FALSE, FALSE, TRUE, 1, $7)
     RETURNING *
     `,
-    [roleId, code, name, description, actorId]
+    [roleId, code, name, description, category, allowedScopeTypes, actorId]
   );
 
   await logRbacAction(
@@ -665,7 +781,7 @@ async function createRole(payload = {}, actorContext = {}, executor = pool) {
       action: "ROLE_CREATED",
       targetType: "ROLE",
       targetId: roleId,
-      detail: { code, name, description },
+      detail: { code, name, description, category, allowedScopeTypes },
       ip: actorContext.ip
     },
     executor
@@ -689,15 +805,50 @@ async function updateRole(id, payload = {}, actorContext = {}, executor = pool) 
 
   const description = payload.description !== undefined ? String(payload.description).trim() : role.description;
 
+  let category = role.category;
+  if (payload.category !== undefined) {
+    const rawCat = String(payload.category).trim().toUpperCase();
+    if (role.isSystem || role.isProtected) {
+      if (rawCat !== role.category) {
+        throw createHttpError("Kategori role sistem/protected bersifat tetap dan tidak dapat diubah.", 400);
+      }
+    } else {
+      if (rawCat === "SYSTEM") {
+        throw createHttpError("Kategori tidak dapat diubah menjadi SYSTEM.", 400);
+      }
+      if (!["FUNCTIONAL", "DIVISION"].includes(rawCat)) {
+        throw createHttpError("Kategori role harus salah satu dari: FUNCTIONAL, DIVISION.", 400);
+      }
+      category = rawCat;
+    }
+  }
+
+  let allowedScopeTypes = role.allowedScopeTypes;
+  if (payload.allowedScopeTypes !== undefined) {
+    if (!Array.isArray(payload.allowedScopeTypes) || payload.allowedScopeTypes.length === 0) {
+      throw createHttpError("allowedScopeTypes harus berupa array of string yang tidak kosong.", 400);
+    }
+    const validScopes = ["LAB", "PROJECT", "DIVISION"];
+    allowedScopeTypes = Array.from(new Set(payload.allowedScopeTypes.map((s) => String(s).trim().toUpperCase())));
+    for (const s of allowedScopeTypes) {
+      if (!validScopes.includes(s)) {
+        throw createHttpError(`Scope type '${s}' tidak valid. Harus salah satu dari: ${validScopes.join(", ")}.`, 400);
+      }
+    }
+    if (category === "DIVISION" && (allowedScopeTypes.length !== 1 || allowedScopeTypes[0] !== "DIVISION")) {
+      throw createHttpError("Role dengan kategori DIVISION hanya boleh mengizinkan scope DIVISION.", 400);
+    }
+  }
+
   const result = await runQuery(
     executor,
     `
     UPDATE rbac_roles
-    SET name = $2, description = $3, version = version + 1, updated_at = NOW()
+    SET name = $2, description = $3, category = $4, allowed_scope_types = $5, version = version + 1, updated_at = NOW()
     WHERE id = $1
     RETURNING *
     `,
-    [id, name, description]
+    [id, name, description, category, allowedScopeTypes]
   );
 
   await logRbacAction(
@@ -707,7 +858,10 @@ async function updateRole(id, payload = {}, actorContext = {}, executor = pool) 
       action: "ROLE_UPDATED",
       targetType: "ROLE",
       targetId: id,
-      detail: { previous: { name: role.name, description: role.description }, updated: { name, description } },
+      detail: {
+        previous: { name: role.name, description: role.description, category: role.category, allowedScopeTypes: role.allowedScopeTypes },
+        updated: { name, description, category, allowedScopeTypes }
+      },
       ip: actorContext.ip
     },
     executor
@@ -722,11 +876,16 @@ async function archiveRole(id, actorContext = {}, executor = pool) {
   if (!role) throw createHttpError("Role tidak ditemukan.", 404);
   if (!role.isActive) throw createHttpError("Role sudah dalam status diarsipkan.", 400);
 
+  // Protected canonical system roles cannot be archived
+  if (role.isSystem || role.isProtected) {
+    throw createHttpError("Role sistem dilindungi (protected canonical role) tidak dapat diarsipkan.", 403);
+  }
+
   const result = await runQuery(
     executor,
     `
     UPDATE rbac_roles
-    SET is_active = FALSE, version = version + 1, updated_at = NOW()
+    SET is_active = FALSE, archived_at = NOW(), version = version + 1, updated_at = NOW()
     WHERE id = $1
     RETURNING *
     `,
@@ -740,7 +899,7 @@ async function archiveRole(id, actorContext = {}, executor = pool) {
       action: "ROLE_ARCHIVED",
       targetType: "ROLE",
       targetId: id,
-      detail: { code: role.code, name: role.name },
+      detail: { code: role.code, name: role.name, category: role.category },
       ip: actorContext.ip
     },
     executor
@@ -759,7 +918,7 @@ async function restoreRole(id, actorContext = {}, executor = pool) {
     executor,
     `
     UPDATE rbac_roles
-    SET is_active = TRUE, version = version + 1, updated_at = NOW()
+    SET is_active = TRUE, archived_at = NULL, version = version + 1, updated_at = NOW()
     WHERE id = $1
     RETURNING *
     `,
@@ -773,7 +932,7 @@ async function restoreRole(id, actorContext = {}, executor = pool) {
       action: "ROLE_RESTORED",
       targetType: "ROLE",
       targetId: id,
-      detail: { code: role.code, name: role.name },
+      detail: { code: role.code, name: role.name, category: role.category },
       ip: actorContext.ip
     },
     executor
@@ -1024,6 +1183,19 @@ async function assignStudentRole(studentId, payload = {}, actorContext = {}, exe
   const scopeType = String(payload.scopeType || "LAB").trim().toUpperCase();
   if (!["LAB", "PROJECT", "DIVISION"].includes(scopeType)) {
     throw createHttpError("scopeType harus salah satu dari: LAB, PROJECT, DIVISION.", 400);
+  }
+
+  // Validate that the role permits this scope
+  if (role.allowedScopeTypes && !role.allowedScopeTypes.includes(scopeType)) {
+    throw createHttpError(
+      `Role '${role.name}' tidak mengizinkan penugasan pada scope ${scopeType}. Scope yang didukung: ${role.allowedScopeTypes.join(", ")}.`,
+      400
+    );
+  }
+
+  // Validate that division roles cannot be assigned to LAB or PROJECT
+  if (role.category === "DIVISION" && scopeType !== "DIVISION") {
+    throw createHttpError("Role dengan kategori DIVISION hanya dapat ditugaskan pada scope DIVISION.", 400);
   }
 
   let scopeId = payload.scopeId ? String(payload.scopeId).trim() : null;
@@ -1848,9 +2020,9 @@ async function reconcileLegacyRole(
 // CONTEXT ROLES FOR FRONTEND INTEGRATION
 // =============================================================================
 
-async function listContextRoles({ scopeType = null } = {}, executor = query) {
+async function listContextRoles({ scopeType = null, category = null } = {}, executor = query) {
   await ensureRbacTables(executor);
-  const roles = await listRoles({ includeArchived: false }, executor);
+  const roles = await listRoles({ includeArchived: false, scopeType, category }, executor);
 
   const SUGGESTED_PERAN_MAP = {
     PROJECT_MANAGER: "Project Manager",
@@ -1859,15 +2031,728 @@ async function listContextRoles({ scopeType = null } = {}, executor = query) {
     CONTRIBUTOR: "Anggota Riset"
   };
 
+  const canonicalPermsMap = {
+    PROJECT_MANAGER: CANONICAL_ROLES.find((c) => c.code === "PROJECT_MANAGER")?.permissions || [],
+    KETUA_RISET: CANONICAL_ROLES.find((c) => c.code === "KETUA_RISET")?.permissions || [],
+    CORE_RESEARCHER: CANONICAL_ROLES.find((c) => c.code === "CORE_RESEARCHER")?.permissions || [],
+    CONTRIBUTOR: CANONICAL_ROLES.find((c) => c.code === "CONTRIBUTOR")?.permissions || []
+  };
+
   return roles.map((r) => ({
     id: r.id,
     code: r.code,
     name: r.name,
     description: r.description,
+    category: r.category,
+    allowedScopeTypes: r.allowedScopeTypes,
     isSystem: r.isSystem,
-    permissions: r.permissions || [],
+    isProtected: r.isProtected,
+    permissions: canonicalPermsMap[r.code] || r.permissions || [],
     suggestedPeran: SUGGESTED_PERAN_MAP[r.code] || r.name
   }));
+}
+
+// =============================================================================
+// ROLE SOURCE DISCOVERY & IMPORT (TASK A.7 & A.8)
+// =============================================================================
+
+async function discoverRoleSources(executor = query) {
+  await ensureRbacTables(executor);
+
+  // 1. Fetch all roles in rbac_roles
+  const roles = await listRoles({ includeArchived: true, limit: 200 }, executor);
+  const roleCodeMap = new Map();
+  const roleNameMap = new Map();
+  for (const r of roles) {
+    roleCodeMap.set(r.code.toUpperCase(), r);
+    roleNameMap.set(r.name.trim().toLowerCase(), r);
+  }
+
+  // 2. Discover distinct roles from research_memberships.peran
+  const res = await runQuery(
+    executor,
+    `
+    SELECT
+      TRIM(rm.peran) AS raw_peran,
+      COUNT(*)::int AS usage_count,
+      COUNT(CASE WHEN COALESCE(rm.status, 'Aktif') = 'Aktif' AND (rm.selesai IS NULL OR rm.selesai >= CURRENT_DATE) THEN 1 END)::int AS active_count
+    FROM research_memberships rm
+    WHERE rm.member_type = 'Mahasiswa'
+      AND rm.peran IS NOT NULL
+      AND TRIM(rm.peran) <> ''
+      AND LOWER(TRIM(rm.peran)) <> 'alumni'
+    GROUP BY TRIM(rm.peran)
+    ORDER BY active_count DESC, usage_count DESC, raw_peran ASC
+    `
+  );
+
+  const sources = res.rows.map((row) => {
+    const raw = row.raw_peran;
+    const lower = raw.toLowerCase();
+    const candidateCode = raw
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 50);
+
+    const matchedRole = roleNameMap.get(lower) || roleCodeMap.get(candidateCode) || null;
+    const isRegistered = Boolean(matchedRole);
+
+    let suggestedCategory = "FUNCTIONAL";
+    if (/\b(divisi|division)\b/i.test(raw)) {
+      suggestedCategory = "DIVISION";
+    }
+
+    // Candidate aliases
+    const candidateAliases = [];
+    if (/developer|engineer|dev/i.test(raw)) {
+      if (/backend|be/i.test(raw)) candidateAliases.push("Backend Engineer", "Backend Developer", "BE Dev");
+      if (/frontend|fe/i.test(raw)) candidateAliases.push("Frontend Engineer", "Frontend Developer", "FE Dev");
+      if (/web/i.test(raw)) candidateAliases.push("Web Engineer", "Web Developer");
+      if (/android|mobile/i.test(raw)) candidateAliases.push("Android Developer", "Mobile Engineer");
+      if (/iot/i.test(raw)) candidateAliases.push("IoT Engineer", "IoT Developer");
+    }
+
+    return {
+      rawPeran: raw,
+      usageCount: row.usage_count,
+      activeCount: row.active_count,
+      isRegistered,
+      matchedRole: matchedRole
+        ? {
+            id: matchedRole.id,
+            code: matchedRole.code,
+            name: matchedRole.name,
+            category: matchedRole.category,
+            isActive: matchedRole.isActive
+          }
+        : null,
+      candidateCode,
+      suggestedCategory,
+      candidateAliases: Array.from(new Set(candidateAliases.filter((a) => a.toLowerCase() !== lower)))
+    };
+  });
+
+  return { sources };
+}
+
+async function importRoleDefinition(payload = {}, actorContext = {}, executor = pool) {
+  await ensureRbacTables(executor);
+
+  const rawPeran = String(payload.sourcePeran || payload.name || "").trim();
+  if (!rawPeran) {
+    throw createHttpError("sourcePeran atau name wajib diisi untuk mengimpor role.", 400);
+  }
+
+  const name = payload.name ? String(payload.name).trim() : rawPeran;
+  const code = validateRoleCode(
+    payload.code ||
+      name
+        .toUpperCase()
+        .replace(/[^A-Z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, "")
+        .slice(0, 50)
+  );
+
+  let category = String(payload.category || "FUNCTIONAL").trim().toUpperCase();
+  if (category === "SYSTEM") {
+    throw createHttpError("Role yang diimpor tidak boleh memiliki kategori SYSTEM.", 400);
+  }
+  if (!["FUNCTIONAL", "DIVISION"].includes(category)) {
+    throw createHttpError("Kategori harus salah satu dari: FUNCTIONAL, DIVISION.", 400);
+  }
+
+  let allowedScopeTypes = payload.allowedScopeTypes;
+  if (!allowedScopeTypes) {
+    allowedScopeTypes = category === "DIVISION" ? ["DIVISION"] : ["LAB", "PROJECT", "DIVISION"];
+  }
+
+  // Check unique code
+  const existing = await getRoleByCode(code, executor);
+  if (existing) {
+    throw createHttpError(`Role dengan kode '${code}' sudah terdaftar.`, 409);
+  }
+
+  const description = payload.description
+    ? String(payload.description).trim()
+    : `Role fungsional yang diimpor dari deskripsi keanggotaan riset: ${rawPeran}`;
+
+  const roleId = buildId("ROL");
+  const actorId = actorContext.actorId || null;
+  const actorRole = actorContext.actorRole || "OPERATOR";
+
+  const result = await runQuery(
+    executor,
+    `
+    INSERT INTO rbac_roles (id, code, name, description, category, allowed_scope_types, is_system, is_protected, is_active, version, created_by)
+    VALUES ($1, $2, $3, $4, $5, $6, FALSE, FALSE, TRUE, 1, $7)
+    RETURNING *
+    `,
+    [roleId, code, name, description, category, allowedScopeTypes, actorId]
+  );
+
+  // Imported roles start with 0 permissions and 0 assignments
+  await logRbacAction(
+    {
+      actorId,
+      actorRole,
+      action: "ROLE_IMPORTED",
+      targetType: "ROLE",
+      targetId: roleId,
+      detail: {
+        sourcePeran: rawPeran,
+        code,
+        name,
+        category,
+        allowedScopeTypes,
+        description
+      },
+      ip: actorContext.ip
+    },
+    executor
+  );
+
+  return mapRoleRow(result.rows[0]);
+}
+
+// =============================================================================
+// RETIREMENT IMPACT & REPLACE AND ARCHIVE (TASK B)
+// =============================================================================
+
+async function getRoleRetirementImpact(sourceRoleId, replacementRoleId = null, executor = query) {
+  await ensureRbacTables(executor);
+
+  const sourceRole = await getRoleById(sourceRoleId, executor);
+  if (!sourceRole) {
+    throw createHttpError("Role sumber tidak ditemukan.", 404);
+  }
+
+  let replacementRole = null;
+  if (replacementRoleId) {
+    replacementRole = await getRoleById(replacementRoleId, executor);
+    if (!replacementRole) {
+      replacementRole = await getRoleByCode(replacementRoleId, executor);
+    }
+  }
+
+  // 1. Active student assignments for source role
+  const assignmentsRes = await runQuery(
+    executor,
+    `
+    SELECT sra.id AS assignment_id, sra.student_id, sra.scope_type, sra.scope_id, sra.assigned_at,
+           s.nim, u.name AS student_name, u.email AS student_email
+    FROM student_role_assignments sra
+    JOIN students s ON s.id = sra.student_id
+    JOIN users u ON u.id = s.user_id
+    WHERE sra.role_id = $1 AND sra.is_active = TRUE AND sra.revoked_at IS NULL
+      AND (sra.expires_at IS NULL OR sra.expires_at > NOW())
+    ORDER BY sra.assigned_at ASC
+    `,
+    [sourceRoleId]
+  );
+
+  const activeAssignments = assignmentsRes.rows;
+  const activeAssignmentsCount = activeAssignments.length;
+  const uniqueStudents = new Set(activeAssignments.map((a) => a.student_id));
+  const distinctAffectedStudentsCount = uniqueStudents.size;
+
+  // 2. Research membership label references (research_memberships.peran)
+  const memRes = await runQuery(
+    executor,
+    `
+    SELECT rm.id, rm.project_id, rm.user_id, rm.peran, rm.status, rp.title AS project_title,
+           s.id AS student_id, s.nim, u.name AS student_name
+    FROM research_memberships rm
+    JOIN users u ON u.id = rm.user_id
+    JOIN students s ON s.user_id = u.id
+    JOIN research_projects rp ON rp.id = rm.project_id
+    WHERE rm.member_type = 'Mahasiswa'
+      AND (
+        LOWER(TRIM(rm.peran)) = LOWER(TRIM($1))
+        OR LOWER(TRIM(rm.peran)) = LOWER(TRIM($2))
+      )
+    ORDER BY rm.project_id, s.nim
+    `,
+    [sourceRole.name, sourceRole.code]
+  );
+
+  const researchMembershipLabelReferences = {
+    count: memRes.rowCount,
+    activeCount: memRes.rows.filter((r) => (r.status || "Aktif") === "Aktif").length,
+    references: memRes.rows.map((r) => ({
+      membershipId: r.id,
+      projectId: r.project_id,
+      projectTitle: r.project_title,
+      studentId: r.student_id,
+      studentName: r.student_name,
+      nim: r.nim,
+      peran: r.peran,
+      status: r.status
+    }))
+  };
+
+  // 3. Division references
+  const divisionAssignments = activeAssignments.filter((a) => a.scope_type === "DIVISION");
+  const divisionReferences = {
+    count: divisionAssignments.length,
+    assignments: divisionAssignments
+  };
+
+  // 4. Relevant evaluation role mappings
+  let evaluationRoleMappings = [];
+  try {
+    const evalRes = await runQuery(
+      executor,
+      `
+      SELECT id, period_id, group_id, student_id, role_name
+      FROM pm_evaluation_group_roles
+      WHERE LOWER(TRIM(role_name)) = LOWER(TRIM($1)) OR LOWER(TRIM(role_name)) = LOWER(TRIM($2))
+      `,
+      [sourceRole.name, sourceRole.code]
+    );
+    evaluationRoleMappings = evalRes.rows;
+  } catch (err) {
+    // Optional table or schema difference
+  }
+
+  // 5. Scope compatibility
+  const sourceScopes = Array.from(new Set(activeAssignments.map((a) => a.scope_type)));
+  const replacementScopes = replacementRole ? (replacementRole.allowedScopeTypes || []) : [];
+  const incompatibleScopes = sourceScopes.filter((s) => !replacementScopes.includes(s));
+  const isScopeCompatible = replacementRole ? incompatibleScopes.length === 0 : false;
+
+  // 6. Permission gains and losses
+  const sourcePermsRes = await runQuery(
+    executor,
+    `
+    SELECT p.code FROM rbac_role_permissions rp
+    JOIN rbac_permissions p ON p.id = rp.permission_id
+    WHERE rp.role_id = $1
+    `,
+    [sourceRoleId]
+  );
+  const sourcePermissions = sourcePermsRes.rows.map((r) => r.code);
+
+  let replacementPermissions = [];
+  if (replacementRole) {
+    const replPermsRes = await runQuery(
+      executor,
+      `
+      SELECT p.code FROM rbac_role_permissions rp
+      JOIN rbac_permissions p ON p.id = rp.permission_id
+      WHERE rp.role_id = $1
+      `,
+      [replacementRole.id]
+    );
+    replacementPermissions = replPermsRes.rows.map((r) => r.code);
+  }
+
+  const gainedPermissions = replacementPermissions.filter((p) => !sourcePermissions.includes(p));
+  const lostPermissions = sourcePermissions.filter((p) => !replacementPermissions.includes(p));
+
+  // 7. Duplicate assignments (if replaced, student already has replacement role on identical scope)
+  let duplicateAssignments = [];
+  if (replacementRole) {
+    for (const a of activeAssignments) {
+      const dupRes = await runQuery(
+        executor,
+        `
+        SELECT id FROM student_role_assignments
+        WHERE student_id = $1 AND role_id = $2 AND scope_type = $3
+          AND COALESCE(scope_id, 'GLOBAL_LAB') = COALESCE($4, 'GLOBAL_LAB')
+          AND is_active = TRUE AND revoked_at IS NULL
+          AND (expires_at IS NULL OR expires_at > NOW())
+        LIMIT 1
+        `,
+        [a.student_id, replacementRole.id, a.scope_type, a.scope_id]
+      );
+      if (dupRes.rowCount > 0) {
+        duplicateAssignments.push({
+          studentId: a.student_id,
+          studentName: a.student_name,
+          scopeType: a.scope_type,
+          scopeId: a.scope_id,
+          existingAssignmentId: dupRes.rows[0].id
+        });
+      }
+    }
+  }
+
+  // 8. Blocking issues
+  const blockingIssues = [];
+  if (sourceRole.isSystem || sourceRole.isProtected) {
+    blockingIssues.push("Role sistem dilindungi (protected canonical role) tidak dapat digantikan atau diarsipkan.");
+  }
+  if (!replacementRole) {
+    blockingIssues.push("Role pengganti (replacementRoleId) belum dipilih.");
+  } else {
+    if (replacementRole.id === sourceRole.id) {
+      blockingIssues.push("Role pengganti tidak boleh sama dengan role sumber.");
+    }
+    if (!replacementRole.isActive) {
+      blockingIssues.push(`Role pengganti '${replacementRole.name}' sedang dalam status nonaktif/diarsipkan.`);
+    }
+    if (incompatibleScopes.length > 0) {
+      blockingIssues.push(
+        `Role pengganti tidak mendukung scope penugasan aktif sumber: ${incompatibleScopes.join(", ")}.`
+      );
+    }
+  }
+
+  return {
+    sourceRole: {
+      id: sourceRole.id,
+      code: sourceRole.code,
+      name: sourceRole.name,
+      category: sourceRole.category,
+      allowedScopeTypes: sourceRole.allowedScopeTypes,
+      isSystem: sourceRole.isSystem,
+      isProtected: sourceRole.isProtected,
+      isActive: sourceRole.isActive,
+      version: sourceRole.version
+    },
+    replacementRole: replacementRole
+      ? {
+          id: replacementRole.id,
+          code: replacementRole.code,
+          name: replacementRole.name,
+          category: replacementRole.category,
+          allowedScopeTypes: replacementRole.allowedScopeTypes,
+          isSystem: replacementRole.isSystem,
+          isProtected: replacementRole.isProtected,
+          isActive: replacementRole.isActive,
+          version: replacementRole.version
+        }
+      : null,
+    activeAssignmentsCount,
+    distinctAffectedStudentsCount,
+    affectedStudents: activeAssignments.map((a) => ({
+      assignmentId: a.assignment_id,
+      studentId: a.student_id,
+      nim: a.nim,
+      name: a.student_name,
+      scopeType: a.scope_type,
+      scopeId: a.scope_id
+    })),
+    researchMembershipLabelReferences,
+    divisionReferences,
+    relevantEvaluationRoleMappings: evaluationRoleMappings,
+    scopeCompatibility: {
+      isCompatible: isScopeCompatible,
+      sourceScopes,
+      replacementScopes,
+      incompatibleScopes
+    },
+    permissionDiff: {
+      sourcePermissions,
+      replacementPermissions,
+      gainedPermissions,
+      lostPermissions,
+      requiresGainConfirmation: gainedPermissions.length > 0
+    },
+    duplicateAssignments,
+    blockingIssues,
+    canProceed: blockingIssues.length === 0 && Boolean(replacementRole)
+  };
+}
+
+async function replaceAndArchiveRole(sourceRoleId, payload = {}, actorContext = {}, executor = pool) {
+  await ensureRbacTables(executor);
+
+  const replacementRoleId = payload.replacementRoleId ? String(payload.replacementRoleId).trim() : null;
+  if (!replacementRoleId) {
+    throw createHttpError("replacementRoleId wajib diisi.", 400);
+  }
+
+  if (payload.sourceVersion === undefined || payload.sourceVersion === null) {
+    throw createHttpError("sourceVersion (versi sumber) wajib diisi untuk concurrency control.", 400);
+  }
+  const sourceVersion = Number(payload.sourceVersion);
+
+  const reason = String(payload.reason || "").trim();
+  if (!reason) {
+    throw createHttpError("Alasan penggantian dan pengarsipan role wajib disertakan.", 400);
+  }
+
+  const migrateMembershipLabels = Boolean(payload.migrateMembershipLabels);
+
+  const client = typeof executor.connect === "function" ? await executor.connect() : executor;
+  const ownsTransaction = typeof executor.connect === "function";
+
+  try {
+    if (ownsTransaction) await client.query("BEGIN");
+
+    // 1. Lock and validate source role
+    const sourceRes = await client.query(
+      "SELECT * FROM rbac_roles WHERE id = $1 FOR UPDATE",
+      [sourceRoleId]
+    );
+    if (sourceRes.rowCount === 0) {
+      throw createHttpError("Role sumber tidak ditemukan.", 404);
+    }
+    const source = sourceRes.rows[0];
+
+    if (source.is_system || source.is_protected) {
+      throw createHttpError("Role sistem dilindungi (protected canonical role) tidak dapat digantikan atau diarsipkan.", 403);
+    }
+
+    if (!source.is_active) {
+      throw createHttpError("Role sumber sudah dalam status nonaktif/diarsipkan.", 400);
+    }
+
+    // Optimistic concurrency check on source
+    if (source.version !== sourceVersion) {
+      throw createHttpError(
+        `Konflik konkurensi (versi diharapkan: ${sourceVersion}, versi saat ini: ${source.version}). Data telah berubah sejak preview. Silakan muat ulang preview dampak sebelum melanjutkan.`,
+        409
+      );
+    }
+
+    // 2. Lock and validate replacement role
+    const replRes = await client.query(
+      "SELECT * FROM rbac_roles WHERE id = $1 OR code = $1 FOR UPDATE",
+      [replacementRoleId]
+    );
+    if (replRes.rowCount === 0) {
+      throw createHttpError("Role pengganti tidak ditemukan.", 404);
+    }
+    const replacement = replRes.rows[0];
+
+    // Optimistic concurrency check on replacement (targetVersion)
+    if (payload.expectedReplacementVersion !== undefined && payload.expectedReplacementVersion !== null) {
+      const expReplVer = Number(payload.expectedReplacementVersion);
+      if (replacement.version !== expReplVer) {
+        throw createHttpError(
+          `Konflik konkurensi role pengganti (versi diharapkan: ${expReplVer}, versi saat ini: ${replacement.version}). Definisi role pengganti telah berubah sejak preview. Silakan muat ulang preview dampak sebelum melanjutkan.`,
+          409
+        );
+      }
+    }
+
+    if (replacement.id === source.id) {
+      throw createHttpError("Role pengganti tidak boleh sama dengan role sumber.", 400);
+    }
+
+    if (!replacement.is_active) {
+      throw createHttpError(`Role pengganti '${replacement.name}' sedang dalam status nonaktif/diarsipkan.`, 400);
+    }
+
+    // 3. Lock active source assignments
+    const activeAssignRes = await client.query(
+      `
+      SELECT * FROM student_role_assignments
+      WHERE role_id = $1 AND is_active = TRUE AND revoked_at IS NULL
+        AND (expires_at IS NULL OR expires_at > NOW())
+      FOR UPDATE
+      `,
+      [source.id]
+    );
+    const assignments = activeAssignRes.rows;
+
+    // Concurrency check on active assignments impact if provided
+    if (payload.expectedActiveAssignmentsCount !== undefined && payload.expectedActiveAssignmentsCount !== null) {
+      const expAssignCount = Number(payload.expectedActiveAssignmentsCount);
+      if (assignments.length !== expAssignCount) {
+        throw createHttpError(
+          `Konflik penugasan aktif (jumlah penugasan saat preview: ${expAssignCount}, saat ini: ${assignments.length}). Telah terjadi perubahan penugasan mahasiswa pada role sumber sejak preview. Silakan muat ulang preview dampak sebelum melanjutkan.`,
+          409
+        );
+      }
+    }
+
+    // Concurrency check on exact assignment identity snapshot if provided
+    if (Array.isArray(payload.expectedAssignmentIds)) {
+      const currentAssignIds = assignments.map((a) => a.id).sort();
+      const expectedAssignIds = Array.from(new Set(payload.expectedAssignmentIds.map((id) => String(id).trim()))).sort();
+      const isIdentical =
+        currentAssignIds.length === expectedAssignIds.length &&
+        currentAssignIds.every((id, idx) => id === expectedAssignIds[idx]);
+
+      if (!isIdentical) {
+        throw createHttpError(
+          "Konflik penugasan aktif (identitas penugasan mahasiswa telah berubah sejak preview). Silakan muat ulang preview dampak sebelum melanjutkan.",
+          409
+        );
+      }
+    }
+
+    // Validate scope compatibility
+    const replScopes = replacement.allowed_scope_types || ["LAB", "PROJECT", "DIVISION"];
+    for (const a of assignments) {
+      if (!replScopes.includes(a.scope_type)) {
+        throw createHttpError(
+          `Role pengganti '${replacement.name}' tidak mendukung scope ${a.scope_type} yang dimiliki oleh salah satu penugasan aktif.`,
+          422
+        );
+      }
+    }
+
+    // 3b. Validate permission delta: prevent silent privilege escalation
+    const sourcePermsRes = await client.query(
+      `
+      SELECT p.code FROM rbac_role_permissions rp
+      JOIN rbac_permissions p ON p.id = rp.permission_id
+      WHERE rp.role_id = $1
+      `,
+      [source.id]
+    );
+    const sourcePerms = new Set(sourcePermsRes.rows.map((r) => r.code));
+
+    const replPermsRes = await client.query(
+      `
+      SELECT p.code FROM rbac_role_permissions rp
+      JOIN rbac_permissions p ON p.id = rp.permission_id
+      WHERE rp.role_id = $1
+      `,
+      [replacement.id]
+    );
+    const replacementPerms = replPermsRes.rows.map((r) => r.code);
+    const gainedPermissions = replacementPerms.filter((p) => !sourcePerms.has(p));
+    const lostPermissions = Array.from(sourcePerms).filter((p) => !replacementPerms.includes(p));
+
+    if (gainedPermissions.length > 0 && !payload.confirmPermissionGains) {
+      throw createHttpError(
+        `Penggantian role ke '${replacement.name}' menyebabkan peningkatan hak akses (${gainedPermissions.length} permission baru: ${gainedPermissions.join(", ")}). Diperlukan konfirmasi eksplisit (confirmPermissionGains: true).`,
+        400
+      );
+    }
+
+    // 4. Migrate assignments
+    let migratedAssignmentsCount = 0;
+    let duplicateAssignmentsSkipped = 0;
+
+    for (const a of assignments) {
+      // Check if student already has active assignment for replacement role in same scope
+      const dupRes = await client.query(
+        `
+        SELECT id FROM student_role_assignments
+        WHERE student_id = $1 AND role_id = $2 AND scope_type = $3
+          AND COALESCE(scope_id, 'GLOBAL_LAB') = COALESCE($4, 'GLOBAL_LAB')
+          AND is_active = TRUE AND revoked_at IS NULL
+          AND (expires_at IS NULL OR expires_at > NOW())
+        LIMIT 1
+        `,
+        [a.student_id, replacement.id, a.scope_type, a.scope_id]
+      );
+
+      // Revoke source assignment with full audit trail
+      await client.query(
+        `
+        UPDATE student_role_assignments
+        SET is_active = FALSE,
+            revoked_at = NOW(),
+            revoked_by = $2,
+            revocation_reason = $3,
+            updated_at = NOW()
+        WHERE id = $1
+        `,
+        [
+          a.id,
+          actorContext.actorId || null,
+          `Digantikan oleh role '${replacement.name}' (${replacement.code}): ${reason}`
+        ]
+      );
+
+      if (dupRes.rowCount > 0) {
+        // Already assigned on that scope, no duplicate created
+        duplicateAssignmentsSkipped++;
+      } else {
+        // Create new replacement assignment
+        const newAssignId = buildId("SRA-RPL");
+        await client.query(
+          `
+          INSERT INTO student_role_assignments (
+            id, student_id, role_id, scope_type, scope_id, assigned_by, assigned_at, expires_at, is_active
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, TRUE)
+          `,
+          [
+            newAssignId,
+            a.student_id,
+            replacement.id,
+            a.scope_type,
+            a.scope_id,
+            actorContext.actorId || null,
+            a.expires_at || null
+          ]
+        );
+        migratedAssignmentsCount++;
+      }
+    }
+
+    // 5. Update research_memberships.peran ONLY IF explicitly requested
+    let membershipLabelsUpdated = 0;
+    if (migrateMembershipLabels) {
+      const updateMemRes = await client.query(
+        `
+        UPDATE research_memberships
+        SET peran = $1
+        WHERE member_type = 'Mahasiswa'
+          AND (
+            LOWER(TRIM(peran)) = LOWER(TRIM($2))
+            OR LOWER(TRIM(peran)) = LOWER(TRIM($3))
+          )
+        `,
+        [replacement.name, source.name, source.code]
+      );
+      membershipLabelsUpdated = updateMemRes.rowCount;
+    }
+
+    // 6. Archive source role
+    await client.query(
+      `
+      UPDATE rbac_roles
+      SET is_active = FALSE,
+          archived_at = NOW(),
+          version = version + 1,
+          updated_at = NOW()
+      WHERE id = $1
+      `,
+      [source.id]
+    );
+
+    // 7. Write audit log
+    await logRbacAction(
+      {
+        actorId: actorContext.actorId,
+        actorRole: actorContext.actorRole,
+        action: "ROLE_REPLACE_AND_ARCHIVE",
+        targetType: "ROLE",
+        targetId: source.id,
+        detail: {
+          sourceRole: { id: source.id, code: source.code, name: source.name, category: source.category, version: source.version },
+          replacementRole: { id: replacement.id, code: replacement.code, name: replacement.name, category: replacement.category },
+          reason,
+          migrateMembershipLabels,
+          confirmPermissionGains: Boolean(payload.confirmPermissionGains),
+          gainedPermissions,
+          lostPermissions,
+          migratedAssignmentsCount,
+          duplicateAssignmentsSkipped,
+          membershipLabelsUpdated
+        },
+        ip: actorContext.ip
+      },
+      client
+    );
+
+    if (ownsTransaction) await client.query("COMMIT");
+
+    return {
+      sourceRoleId: source.id,
+      replacementRoleId: replacement.id,
+      migratedAssignmentsCount,
+      duplicateAssignmentsSkipped,
+      membershipLabelsUpdated,
+      gainedPermissions,
+      lostPermissions
+    };
+  } catch (err) {
+    if (ownsTransaction) await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    if (ownsTransaction) client.release();
+  }
 }
 
 module.exports = {
@@ -1902,5 +2787,9 @@ module.exports = {
   resolveLegacyRole,
   listLegacyReconciliations,
   reconcileLegacyRole,
-  listContextRoles
+  listContextRoles,
+  discoverRoleSources,
+  importRoleDefinition,
+  getRoleRetirementImpact,
+  replaceAndArchiveRole
 };
