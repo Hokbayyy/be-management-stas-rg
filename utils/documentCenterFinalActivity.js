@@ -2064,7 +2064,7 @@ async function updateFinalActivityDynamicData({ id, body, authUser, ip }) {
                 JOIN research_memberships rm ON rm.user_id = s.user_id
                 WHERE s.id = $2
                   AND (rm.project_id = cp.legacy_project_id OR cp.legacy_project_id IS NULL)
-                  AND rm.member_type = 'Mahasiswa'
+                  AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'
                   AND NULLIF(BTRIM(rm.peran), '') IS NOT NULL
                 ORDER BY CASE WHEN rm.project_id = cp.legacy_project_id THEN 0 ELSE 1 END, rm.id ASC
                 LIMIT 1
@@ -2076,7 +2076,7 @@ async function updateFinalActivityDynamicData({ id, body, authUser, ip }) {
                 JOIN research_divisions rd ON rd.id = rm.division_id
                 WHERE s.id = $2
                   AND (rm.project_id = cp.legacy_project_id OR cp.legacy_project_id IS NULL)
-                  AND rm.member_type = 'Mahasiswa'
+                  AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'
                   AND NULLIF(BTRIM(rd.name), '') IS NOT NULL
                 ORDER BY CASE WHEN rm.project_id = cp.legacy_project_id THEN 0 ELSE 1 END, rm.id ASC
                 LIMIT 1
@@ -2225,7 +2225,7 @@ async function updateFinalActivityDynamicData({ id, body, authUser, ip }) {
            WHERE s.id = $1
              AND rm.user_id = s.user_id
              AND rm.project_id = $2
-             AND rm.member_type = 'Mahasiswa'`,
+             AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'`,
           [caseRow.legacy_student_id, current.legacy_project_id, update.role]
         ).catch(() => {});
         await pool.query(
@@ -2371,7 +2371,27 @@ async function healCaseAlumniRoleByCaseId(caseId, { forceSyncFromStudent = false
                 ) rp_primary ON TRUE
                 WHERE s.id = $2
                 LIMIT 1
-              ) AS resolved_project_short_title
+              ) AS resolved_project_short_title,
+              (
+                SELECT TO_CHAR(rm.bergabung, 'YYYY-MM-DD')
+                FROM students s
+                JOIN research_memberships rm ON rm.user_id = s.user_id
+                WHERE s.id = $2
+                  AND (rm.project_id = cp.legacy_project_id OR cp.legacy_project_id IS NULL)
+                  AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'
+                ORDER BY CASE WHEN rm.project_id = cp.legacy_project_id THEN 0 ELSE 1 END, rm.id ASC
+                LIMIT 1
+              ) AS resolved_joined_at,
+              (
+                SELECT TO_CHAR(rm.selesai, 'YYYY-MM-DD')
+                FROM students s
+                JOIN research_memberships rm ON rm.user_id = s.user_id
+                WHERE s.id = $2
+                  AND (rm.project_id = cp.legacy_project_id OR cp.legacy_project_id IS NULL)
+                  AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'
+                ORDER BY CASE WHEN rm.project_id = cp.legacy_project_id THEN 0 ELSE 1 END, rm.id ASC
+                LIMIT 1
+              ) AS resolved_completed_at
        FROM dc_final_activity_case_projects cp
        WHERE cp.final_activity_case_id = $1
        ORDER BY cp.display_order, cp.id
@@ -2417,16 +2437,23 @@ async function healCaseAlumniRoleByCaseId(caseId, { forceSyncFromStudent = false
           targetRole = candidate || inferredRole || (caseRow.activity_type === "Riset" ? "Peneliti" : "Web Developer");
         }
       }
+      const resolvedJoinedAt = row.resolved_joined_at || "";
+      const resolvedCompletedAt = row.resolved_completed_at || "";
       const shouldUpdateRole = Boolean(targetRole) && snapshotRole !== targetRole;
       const shouldUpdateTitle = Boolean(resolvedTitle) && (
         !snapshotTitle ||
         (forceSyncFromStudent && snapshotTitle !== resolvedTitle)
       );
-      if (shouldUpdateRole || shouldUpdateTitle) {
+      const shouldUpdateJoined = Boolean(resolvedJoinedAt) && row.project_snapshot?.joinedAt !== resolvedJoinedAt;
+      const shouldUpdateCompleted = Boolean(resolvedCompletedAt) && row.project_snapshot?.completedAt !== resolvedCompletedAt;
+      const shouldUpdateDates = shouldUpdateJoined || shouldUpdateCompleted;
+      if (shouldUpdateRole || shouldUpdateTitle || shouldUpdateDates) {
         const nextProjectSnapshot = {
           ...(row.project_snapshot || {}),
           ...(shouldUpdateRole ? { role: targetRole } : {}),
-          ...(shouldUpdateTitle ? { title: resolvedTitle, shortTitle: resolvedShortTitle || row.project_snapshot?.shortTitle || null } : {})
+          ...(shouldUpdateTitle ? { title: resolvedTitle, shortTitle: resolvedShortTitle || row.project_snapshot?.shortTitle || null } : {}),
+          ...(shouldUpdateJoined ? { joinedAt: resolvedJoinedAt } : {}),
+          ...(shouldUpdateCompleted ? { completedAt: resolvedCompletedAt } : {})
         };
         await client.query(
           `UPDATE dc_final_activity_case_projects

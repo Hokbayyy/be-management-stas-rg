@@ -620,7 +620,7 @@ router.get(
           ) AS research_memberships
         FROM research_memberships rm
         JOIN research_projects rp ON rp.id = rm.project_id
-        WHERE rm.user_id = u.id AND rm.member_type = 'Mahasiswa'
+        WHERE rm.user_id = u.id AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'
       ) mem ON TRUE
       ${whereClause}
       ORDER BY ${sortColumn} ${sortDir}, s.id ASC
@@ -708,7 +708,7 @@ router.get(
           ) AS research_memberships
         FROM research_memberships rm
         JOIN research_projects rp ON rp.id = rm.project_id
-        WHERE rm.user_id = u.id AND rm.member_type = 'Mahasiswa'
+        WHERE rm.user_id = u.id AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'
       ) mem ON TRUE
       WHERE s.id = $1
       `,
@@ -1113,7 +1113,7 @@ router.put(
           SET status = 'Nonaktif',
               selesai = COALESCE(selesai, CURRENT_DATE)
           WHERE user_id = $1
-            AND member_type = 'Mahasiswa'
+            AND LOWER(COALESCE(member_type, 'mahasiswa')) = 'mahasiswa'
           `,
           [userId]
         );

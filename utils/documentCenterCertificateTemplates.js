@@ -611,7 +611,17 @@ async function loadActiveTemplateForCertificate(client, { definitionId, activity
 
 function periodLabel(period) {
   if (!period) return "-";
-  return `${formatDateId(period.startDate)} sampai ${formatDateId(period.endDate)}`;
+  const start = formatDateId(period.startDate || period.joinedAt);
+  const end = formatDateId(period.endDate || period.completedAt);
+  if (start && end) {
+    if (start === end) {
+      return start;
+    }
+    return `${start} sampai ${end}`;
+  }
+  if (start) return `sejak ${start}`;
+  if (end) return `sampai ${end}`;
+  return "-";
 }
 
 function certificateActivityType(caseRow, projectRow) {
@@ -623,10 +633,18 @@ function buildCertificateData(caseRow, projectRow) {
   const activityType = certificateActivityType(caseRow, projectRow);
   const rawRole = projectRow.project_snapshot?.role || projectRow.project_snapshot?.position;
   const projectTitle = projectRow.project_snapshot?.title || projectRow.project_snapshot?.name || projectRow.legacy_project_id;
+  const project = projectRow.project_snapshot || {};
+  const casePeriod = caseRow.period_snapshot || {};
+  const effectivePeriod = {
+    ...casePeriod,
+    startDate: project.joinedAt || casePeriod.startDate || null,
+    endDate: project.completedAt || casePeriod.endDate || null,
+    description: project.shortTitle || project.title || casePeriod.description || null
+  };
   return {
     studentName: caseRow.student_snapshot?.name || caseRow.legacy_student_id,
     activityType,
-    periodLabel: periodLabel(caseRow.period_snapshot),
+    periodLabel: periodLabel(effectivePeriod),
     projectTitle,
     projectRole: resolveCertificateRole(rawRole, activityType, projectTitle)
   };
@@ -714,7 +732,29 @@ async function generateCertificateDraft({ id, authUser, ip }) {
                FROM students s
                WHERE s.id = c.legacy_student_id
                LIMIT 1
-             ) AS rm_peran
+             ) AS rm_peran,
+             (
+               SELECT TO_CHAR(rm.bergabung, 'YYYY-MM-DD')
+               FROM students s
+               JOIN research_memberships rm
+                 ON rm.user_id = s.user_id
+                AND (rm.project_id = cp.legacy_project_id OR cp.legacy_project_id IS NULL)
+                AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'
+               WHERE s.id = c.legacy_student_id
+               ORDER BY CASE WHEN rm.project_id = cp.legacy_project_id THEN 0 ELSE 1 END, rm.id ASC
+               LIMIT 1
+             ) AS resolved_joined_at,
+             (
+               SELECT TO_CHAR(rm.selesai, 'YYYY-MM-DD')
+               FROM students s
+               JOIN research_memberships rm
+                 ON rm.user_id = s.user_id
+                AND (rm.project_id = cp.legacy_project_id OR cp.legacy_project_id IS NULL)
+                AND LOWER(COALESCE(rm.member_type, 'mahasiswa')) = 'mahasiswa'
+               WHERE s.id = c.legacy_student_id
+               ORDER BY CASE WHEN rm.project_id = cp.legacy_project_id THEN 0 ELSE 1 END, rm.id ASC
+               LIMIT 1
+             ) AS resolved_completed_at
       FROM dc_final_activity_case_projects cp
       JOIN dc_final_activity_cases c ON c.id = cp.final_activity_case_id
       WHERE cp.id=$1
@@ -759,13 +799,20 @@ async function generateCertificateDraft({ id, authUser, ip }) {
       resolvedRole = row.activity_type === "Riset" ? "Peneliti" : "Web Developer";
     }
 
+    const resolvedJoinedAt = row.resolved_joined_at || "";
+    const resolvedCompletedAt = row.resolved_completed_at || "";
     const shouldUpdateRole = Boolean(resolvedRole) && row.project_snapshot?.role !== resolvedRole;
     const shouldUpdateTitle = Boolean(resolvedTitle) && row.project_snapshot?.title !== resolvedTitle;
-    if (shouldUpdateRole || shouldUpdateTitle) {
+    const shouldUpdateJoined = Boolean(resolvedJoinedAt) && row.project_snapshot?.joinedAt !== resolvedJoinedAt;
+    const shouldUpdateCompleted = Boolean(resolvedCompletedAt) && row.project_snapshot?.completedAt !== resolvedCompletedAt;
+    const shouldUpdateDates = shouldUpdateJoined || shouldUpdateCompleted;
+    if (shouldUpdateRole || shouldUpdateTitle || shouldUpdateDates) {
       row.project_snapshot = {
         ...(row.project_snapshot || {}),
         ...(shouldUpdateRole ? { role: resolvedRole } : {}),
-        ...(shouldUpdateTitle ? { title: resolvedTitle } : {})
+        ...(shouldUpdateTitle ? { title: resolvedTitle } : {}),
+        ...(shouldUpdateJoined ? { joinedAt: resolvedJoinedAt } : {}),
+        ...(shouldUpdateCompleted ? { completedAt: resolvedCompletedAt } : {})
       };
       await client.query(
         "UPDATE dc_final_activity_case_projects SET project_snapshot=$2::jsonb, updated_at=NOW() WHERE id=$1",
@@ -949,10 +996,18 @@ async function renderPublishedCertificateVersion({ client, document, documentNum
     const effectiveActivityType = rawCertData.activityType || (template.activity_type || "Riset");
     const certProjectTitle = snapshot.project?.title || rawCertData.projectTitle || "";
     const candidateRole = snapshot.project?.role || rawCertData.projectRole;
+    const certPeriod = {
+      startDate: snapshot.project?.joinedAt || snapshot.period?.startDate || rawCertData.period?.startDate,
+      endDate: snapshot.project?.completedAt || snapshot.period?.endDate || rawCertData.period?.endDate
+    };
+    const effectivePeriodLabel = (snapshot.project?.joinedAt || snapshot.project?.completedAt)
+      ? periodLabel(certPeriod)
+      : (rawCertData.periodLabel || periodLabel(snapshot.period));
     const certData = {
       ...rawCertData,
       activityType: effectiveActivityType,
       projectTitle: certProjectTitle,
+      periodLabel: effectivePeriodLabel,
       projectRole: resolveCertificateRole(candidateRole, effectiveActivityType, certProjectTitle)
     };
     const pdfBuffer = await renderCertificatePdf({

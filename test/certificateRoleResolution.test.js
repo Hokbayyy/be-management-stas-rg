@@ -376,6 +376,94 @@ test("Completion Letter buildLetterData never outputs Web Developer for non-web 
   );
 });
 
+test("Certificate period prioritizes project_snapshot joinedAt and completedAt over case-level period", () => {
+  const { buildCertificateData } = require("../utils/documentCenterCertificateTemplates");
+
+  const caseRow = {
+    student_snapshot: { name: "Ahmad Dahlan" },
+    period_snapshot: { startDate: "2026-10-05", endDate: "2026-10-05" },
+    activity_type: "Magang"
+  };
+
+  const projectRowSpecificDates = {
+    project_snapshot: {
+      title: "Creative and Social Media",
+      role: "Creative Content",
+      joinedAt: "2026-02-01",
+      completedAt: "2026-08-31"
+    },
+    display_order: 0
+  };
+
+  const certData = buildCertificateData(caseRow, projectRowSpecificDates);
+  assert.equal(certData.projectTitle, "Creative and Social Media");
+  assert.equal(certData.projectRole, "Creative Content");
+  assert.equal(certData.periodLabel, "1 Februari 2026 sampai 31 Agustus 2026");
+});
+
+test("Certificate and Letter handle single-day / same start and end dates gracefully", () => {
+  const { buildCertificateData } = require("../utils/documentCenterCertificateTemplates");
+  const { buildLetterData } = require("../utils/documentCenterCompletionLetterTemplates");
+
+  const caseRow = {
+    student_snapshot: { name: "Anisa Rahma", nim: "123456", prodi: "Teknik Informatika" },
+    period_snapshot: { startDate: "2026-10-05", endDate: "2026-10-05" },
+    activity_type: "Magang"
+  };
+
+  const projectRowSameDate = {
+    project_snapshot: {
+      title: "Creative and Social Media",
+      role: "Sosial Media",
+      joinedAt: "2026-10-05",
+      completedAt: "2026-10-05"
+    },
+    display_order: 0
+  };
+
+  const certData = buildCertificateData(caseRow, projectRowSameDate);
+  assert.equal(certData.periodLabel, "5 Oktober 2026");
+
+  const letterData = buildLetterData({
+    studentSnapshot: caseRow.student_snapshot,
+    periodSnapshot: caseRow.period_snapshot,
+    projectSnapshot: projectRowSameDate.project_snapshot,
+    activityType: "Magang"
+  });
+  assert.ok(
+    letterData.activityParagraph.includes("pada tanggal 5 Oktober 2026"),
+    "Letter should say 'pada tanggal 5 Oktober 2026' instead of 'terhitung sejak 5 Oktober 2026 sampai dengan 5 Oktober 2026'"
+  );
+});
+
+test("Completion letter prioritizes project-level joinedAt and completedAt over case-level period", () => {
+  const { buildLetterData } = require("../utils/documentCenterCompletionLetterTemplates");
+
+  const studentSnapshot = { name: "Farhan Malik", nim: "1202200005", prodi: "S1 Informatika" };
+  const periodSnapshot = { startDate: "2026-10-05", endDate: "2026-10-05" };
+  const projectSnapshot = {
+    title: "Platform Smart Technology and Applied Sciences",
+    role: "Backend Engineer",
+    joinedAt: "2026-03-01",
+    completedAt: "2026-09-30"
+  };
+
+  const letterData = buildLetterData({
+    studentSnapshot,
+    periodSnapshot,
+    projectSnapshot,
+    activityType: "Riset"
+  });
+
+  assert.equal(letterData.periodStart, "2026-03-01");
+  assert.equal(letterData.periodEnd, "2026-09-30");
+  assert.equal(letterData.projectRole, "Backend Engineer");
+  assert.ok(
+    letterData.activityParagraph.includes("1 Maret 2026 sampai dengan 30 September 2026"),
+    "Letter activity paragraph should use project-specific dates from Data Mahasiswa"
+  );
+});
+
 
 
 

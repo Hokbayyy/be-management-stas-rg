@@ -393,8 +393,8 @@ function buildLetterData({ studentSnapshot, periodSnapshot, projectSnapshot, pro
   const studentNim = safeFallbackText(studentSnapshot?.nim, "-");
   const studyProgram = safeFallbackText(studentSnapshot?.prodi, "-");
   const primaryProject = (Array.isArray(projectSnapshots) ? projectSnapshots.find(Boolean) : projectSnapshot) || {};
-  let periodStart = optionalIsoDate(periodSnapshot?.startDate) || optionalIsoDate(primaryProject.joinedAt) || optionalIsoDate(primaryProject.startDate);
-  let periodEnd = optionalIsoDate(periodSnapshot?.endDate) || optionalIsoDate(primaryProject.completedAt) || optionalIsoDate(primaryProject.endDate);
+  let periodStart = optionalIsoDate(primaryProject.joinedAt) || optionalIsoDate(primaryProject.startDate) || optionalIsoDate(periodSnapshot?.startDate);
+  let periodEnd = optionalIsoDate(primaryProject.completedAt) || optionalIsoDate(primaryProject.endDate) || optionalIsoDate(periodSnapshot?.endDate);
   if (!periodStart && periodEnd) periodStart = periodEnd;
   if (!periodEnd && periodStart) periodEnd = periodStart;
   if (!periodStart && !periodEnd) periodStart = periodEnd = todayIsoDate();
@@ -433,10 +433,13 @@ function buildActivityParagraph(data) {
   const rawRole = data.projectRole ? String(data.projectRole).trim() : "";
   const role = rawRole && !["alumni", "anggota", "anggota riset", "peserta magang", "mahasiswa", "peserta"].includes(rawRole.toLowerCase()) ? rawRole : null;
   const roleText = role ? ` dengan peran sebagai ${role}` : "";
+  const periodText = data.periodStart === data.periodEnd
+    ? `pada tanggal ${formatDateId(`${data.periodStart}T00:00:00Z`)}`
+    : `terhitung sejak ${formatDateId(`${data.periodStart}T00:00:00Z`)} sampai dengan ${formatDateId(`${data.periodEnd}T00:00:00Z`)}`;
   if (data.activityType === "Riset") {
-    return `Yang bersangkutan telah menyelesaikan kegiatan riset di ${safeFallbackText(data.organizationLabel || CONTENT_CONFIG.organizationLabel, "CoE STAS-RG")} sebagai bagian dari proyek "${safeFallbackText(data.projectTitle, "Project belum diisi")}"${roleText}, terhitung sejak ${formatDateId(`${data.periodStart}T00:00:00Z`)} sampai dengan ${formatDateId(`${data.periodEnd}T00:00:00Z`)}.`;
+    return `Yang bersangkutan telah menyelesaikan kegiatan riset di ${safeFallbackText(data.organizationLabel || CONTENT_CONFIG.organizationLabel, "CoE STAS-RG")} sebagai bagian dari proyek "${safeFallbackText(data.projectTitle, "Project belum diisi")}"${roleText}, ${periodText}.`;
   }
-  return `Berdasarkan Surat Penerimaan Magang, yang bersangkutan telah melaksanakan kegiatan magang di ${safeFallbackText(data.organizationLabel || CONTENT_CONFIG.organizationLabel, "CoE STAS-RG")} sebagai bagian dari proyek "${safeFallbackText(data.projectTitle, "Project belum diisi")}"${roleText}, terhitung sejak ${formatDateId(`${data.periodStart}T00:00:00Z`)} sampai dengan ${formatDateId(`${data.periodEnd}T00:00:00Z`)}.`;
+  return `Berdasarkan Surat Penerimaan Magang, yang bersangkutan telah melaksanakan kegiatan magang di ${safeFallbackText(data.organizationLabel || CONTENT_CONFIG.organizationLabel, "CoE STAS-RG")} sebagai bagian dari proyek "${safeFallbackText(data.projectTitle, "Project belum diisi")}"${roleText}, ${periodText}.`;
 }
 
 function signerSnapshot() {
