@@ -338,6 +338,73 @@ async function syncStudentResearchMemberships({ userId, studentStatus = null, re
     return;
   }
 
+  // 1. Fetch existing student research memberships to identify historical roles and statuses
+  const existingRes = await runQuery(
+    executor,
+    `
+    SELECT project_id, peran, status
+    FROM research_memberships
+    WHERE user_id = $1 AND member_type = 'Mahasiswa'
+    `,
+    [userId]
+  );
+  const existingMembershipMap = new Map();
+  for (const row of existingRes.rows) {
+    if (row.project_id) existingMembershipMap.set(row.project_id, { peran: row.peran, status: row.status });
+  }
+
+  // 2. Fetch active roles eligible for PROJECT scope
+  // Exclude division roles and exclusive Dosen roles
+  const activeRolesRes = await runQuery(
+    executor,
+    `
+    SELECT id, code, name, category, allowed_scope_types
+    FROM rbac_roles
+    WHERE is_active = TRUE
+      AND 'PROJECT' = ANY(allowed_scope_types)
+      AND category <> 'DIVISION'
+      AND code <> 'KETUA_RISET'
+    `
+  );
+  const activeRoleNames = new Set();
+  for (const r of activeRolesRes.rows) {
+    if (r.name) activeRoleNames.add(r.name.trim().toLowerCase());
+    if (r.code) activeRoleNames.add(r.code.trim().toLowerCase());
+  }
+
+  // 3. Validate each submitted role
+  for (const item of memberships) {
+    let rawPeran = typeof item.peran === "string" ? item.peran.trim() : "";
+    const existing = existingMembershipMap.get(item.projectId);
+
+    // If role is omitted on edit, preserve existing role
+    if (!rawPeran && existing?.peran) {
+      rawPeran = existing.peran;
+      item.peran = rawPeran;
+    }
+
+    // Explicit role is strictly required for every assigned project (no silent guessing)
+    if (!rawPeran) {
+      const err = new Error(`Peran riset mahasiswa wajib dipilih untuk proyek "${item.projectId}".`);
+      err.status = 400;
+      err.statusCode = 400;
+      throw err;
+    }
+
+    // If peran is unchanged from existing record, allow preserving historical role
+    if (existing?.peran && existing.peran.trim().toLowerCase() === rawPeran.toLowerCase()) {
+      continue;
+    }
+
+    // New assignment or changed role must be an active PROJECT-eligible role
+    if (!activeRoleNames.has(rawPeran.toLowerCase())) {
+      const err = new Error(`Peran "${rawPeran}" tidak aktif atau tidak diizinkan untuk mahasiswa.`);
+      err.status = 400;
+      err.statusCode = 400;
+      throw err;
+    }
+  }
+
   await runQuery(
     executor,
     `
@@ -356,35 +423,7 @@ async function syncStudentResearchMemberships({ userId, studentStatus = null, re
     SELECT selected.project_id,
            $1,
            'Mahasiswa',
-           COALESCE(
-             NULLIF(BTRIM(COALESCE(selected.peran, '')), ''),
-             CASE
-               WHEN LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%creative%'
-                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%konten%'
-                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%desain%'
-                 THEN 'Creative Content'
-               WHEN LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%social media%'
-                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%sosial media%'
-                 THEN 'Sosial Media'
-               WHEN LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%data%'
-                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%machine learning%'
-                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%analitik%'
-                 THEN 'Data Science'
-               WHEN LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%iot%'
-                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%sensor%'
-                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%hardware%'
-                 THEN 'IoT'
-               WHEN LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%qa%'
-                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%testing%'
-                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%quality%'
-                 THEN 'QA'
-               WHEN LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%mobile%'
-                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%android%'
-                 OR LOWER(COALESCE(rp.title, rp.short_title, '')) LIKE '%flutter%'
-                 THEN 'Mobile Developer'
-               ELSE 'Web Developer'
-             END
-           ),
+           BTRIM(selected.peran),
            CASE
              WHEN $6::text = 'Alumni' THEN 'Nonaktif'
              WHEN selected.selesai IS NOT NULL AND selected.selesai < CURRENT_DATE THEN 'Nonaktif'
@@ -397,12 +436,15 @@ async function syncStudentResearchMemberships({ userId, studentStatus = null, re
     ON CONFLICT (project_id, user_id)
     DO UPDATE SET member_type = EXCLUDED.member_type,
                   peran = COALESCE(
-                    CASE WHEN LOWER(BTRIM(COALESCE(EXCLUDED.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(EXCLUDED.peran) END,
-                    CASE WHEN LOWER(BTRIM(COALESCE(research_memberships.peran, ''))) IN ('', 'alumni', 'anggota', 'anggota riset', 'peserta magang', 'mahasiswa', 'peserta') THEN NULL ELSE BTRIM(research_memberships.peran) END,
-                    EXCLUDED.peran,
-                    'Web Developer'
+                    NULLIF(BTRIM(COALESCE(EXCLUDED.peran, '')), ''),
+                    research_memberships.peran
                   ),
-                  status = EXCLUDED.status,
+                  status = CASE
+                    WHEN $6::text = 'Alumni' THEN 'Nonaktif'
+                    WHEN EXCLUDED.selesai IS NOT NULL AND EXCLUDED.selesai < CURRENT_DATE THEN 'Nonaktif'
+                    WHEN research_memberships.status = 'Nonaktif' AND (EXCLUDED.selesai IS NULL OR EXCLUDED.selesai >= CURRENT_DATE) THEN 'Nonaktif'
+                    ELSE EXCLUDED.status
+                  END,
                   bergabung = COALESCE(EXCLUDED.bergabung, research_memberships.bergabung),
                   selesai = EXCLUDED.selesai
     `,
@@ -1666,5 +1708,7 @@ router.get(
     res.json(effective);
   })
 );
+
+router._syncStudentResearchMemberships = syncStudentResearchMemberships;
 
 module.exports = router;

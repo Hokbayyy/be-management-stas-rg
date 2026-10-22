@@ -320,12 +320,109 @@ function normalizeMemberType(value) {
   return String(value || "").trim().toLowerCase();
 }
 
+const CANONICAL_OR_HISTORICAL_KETUA_PERAN = new Set([
+  "ketua",
+  "ketua riset",
+  "ketua peneliti",
+  "ketua pembimbing",
+  "ketua tim",
+  "ketua tim riset",
+  "project manager",
+  "mahasiswa ketua riset",
+  "ketua riset mahasiswa"
+]);
+
 function isKetuaPeran(value) {
   const norm = String(value || "").trim().toLowerCase();
+  if (!norm) return false;
+
+  // Explicitly disallow deputy, assistant, or non-lead titles (Wakil, Asisten, etc.)
   if (/\b(wakil|asisten|assistant|vice|co-|sub-)\b/i.test(norm)) {
     return false;
   }
-  return norm.includes("ketua");
+
+  // Exact match with known canonical and historical leader roles
+  if (CANONICAL_OR_HISTORICAL_KETUA_PERAN.has(norm)) {
+    return true;
+  }
+
+  // Matches leader titles starting with "ketua " (e.g. "ketua riset ...")
+  // but NEVER when preceded by any word (prevent "Wakil Ketua", "Asisten Ketua", etc.)
+  if (/^ketua\b/i.test(norm) || /\b(project manager|mahasiswa ketua riset)\b/i.test(norm)) {
+    return true;
+  }
+
+  return false;
+}
+
+async function validateMemberRoleAssignment({ memberType, peran, isNew = false, existingPeran = null }) {
+  const rawPeran = typeof peran === "string" ? peran.trim() : "";
+
+  // If no new role supplied on update, preserve existing role
+  if (!rawPeran && !isNew) {
+    return existingPeran;
+  }
+
+  // New assignment strictly requires an explicit role
+  if (!rawPeran && isNew) {
+    const err = new Error("Peran riset wajib dipilih.");
+    err.status = 400;
+    err.statusCode = 400;
+    throw err;
+  }
+
+  // If role is unchanged from existing record, allow preserving historical role
+  if (existingPeran && existingPeran.trim().toLowerCase() === rawPeran.toLowerCase()) {
+    return existingPeran;
+  }
+
+  // Role changed or new: validate against active RBAC catalog
+  if (normalizeMemberType(memberType) === "mahasiswa") {
+    const activeRolesRes = await query(
+      `SELECT id, code, name FROM rbac_roles
+       WHERE is_active = TRUE
+         AND 'PROJECT' = ANY(allowed_scope_types)
+         AND category <> 'DIVISION'
+         AND code <> 'KETUA_RISET'`
+    );
+    const activeRoleNames = new Set();
+    for (const r of activeRolesRes.rows) {
+      if (r.name) activeRoleNames.add(r.name.trim().toLowerCase());
+      if (r.code) activeRoleNames.add(r.code.trim().toLowerCase());
+    }
+    if (!activeRoleNames.has(rawPeran.toLowerCase())) {
+      const err = new Error(`Peran "${rawPeran}" tidak aktif atau tidak diizinkan untuk mahasiswa.`);
+      err.status = 400;
+      err.statusCode = 400;
+      throw err;
+    }
+  } else if (normalizeMemberType(memberType) === "dosen") {
+    const DOSEN_ALLOWED_ROLES = new Set([
+      "ketua riset",
+      "ketua peneliti",
+      "pembimbing",
+      "anggota dosen",
+      "peneliti"
+    ]);
+    const dosenRolesRes = await query(
+      `SELECT id, code, name FROM rbac_roles
+       WHERE is_active = TRUE
+         AND 'PROJECT' = ANY(allowed_scope_types)
+         AND code = 'KETUA_RISET'`
+    );
+    for (const r of dosenRolesRes.rows) {
+      if (r.name) DOSEN_ALLOWED_ROLES.add(r.name.trim().toLowerCase());
+      if (r.code) DOSEN_ALLOWED_ROLES.add(r.code.trim().toLowerCase());
+    }
+    if (!DOSEN_ALLOWED_ROLES.has(rawPeran.toLowerCase())) {
+      const err = new Error(`Peran "${rawPeran}" tidak valid untuk Dosen.`);
+      err.status = 400;
+      err.statusCode = 400;
+      throw err;
+    }
+  }
+
+  return rawPeran;
 }
 
 async function ensureSingleKetuaPerScope({ projectId, userIdToExclude, memberType, peran }) {
@@ -338,7 +435,15 @@ async function ensureSingleKetuaPerScope({ projectId, userIdToExclude, memberTyp
     SELECT user_id, peran, member_type
     FROM research_memberships
     WHERE project_id = $1
-      AND LOWER(COALESCE(peran, '')) LIKE '%ketua%'
+      AND (
+        LOWER(COALESCE(peran, '')) IN (
+          'ketua', 'ketua riset', 'ketua peneliti', 'ketua pembimbing',
+          'ketua tim', 'ketua tim riset', 'project manager',
+          'mahasiswa ketua riset', 'ketua riset mahasiswa'
+        )
+        OR LOWER(COALESCE(peran, '')) ~* '^ketua\\y'
+        OR LOWER(COALESCE(peran, '')) ~* '\\y(project manager|mahasiswa ketua riset)\\y'
+      )
       AND NOT (LOWER(COALESCE(peran, '')) ~* '\\y(wakil|asisten|assistant|vice|co-|sub-)\\y')
       AND LOWER(COALESCE(member_type, '')) ${isMahasiswaKetua ? "=" : "<>"} 'mahasiswa'
       ${userIdToExclude ? "AND user_id != $2" : ""}
@@ -350,7 +455,7 @@ async function ensureSingleKetuaPerScope({ projectId, userIdToExclude, memberTyp
   if (existingKetua.rowCount === 0) return null;
 
   return isMahasiswaKetua
-    ? `Hanya boleh ada 1 Mahasiswa Ketua Riset per riset. Ketua saat ini: ${existingKetua.rows[0].peran}`
+    ? `Hanya boleh ada 1 Mahasiswa Ketua Riset / Project Manager per riset. Ketua saat ini: ${existingKetua.rows[0].peran}`
     : `Hanya boleh ada 1 Ketua Peneliti/Pembimbing per riset. Ketua saat ini: ${existingKetua.rows[0].peran}`;
 }
 
@@ -366,7 +471,14 @@ async function isProjectLeaderMember({ userId, projectId }) {
     WHERE project_id = $1
       AND user_id = $2
       AND LOWER(COALESCE(member_type, '')) = 'mahasiswa'
-      AND LOWER(COALESCE(peran, '')) LIKE '%ketua%'
+      AND (
+        LOWER(COALESCE(peran, '')) IN (
+          'project manager', 'mahasiswa ketua riset', 'ketua riset mahasiswa',
+          'ketua riset', 'ketua tim riset', 'ketua'
+        )
+        OR LOWER(COALESCE(peran, '')) ~* '^ketua\\y'
+        OR LOWER(COALESCE(peran, '')) ~* '\\y(project manager|mahasiswa ketua riset)\\y'
+      )
       AND NOT (LOWER(COALESCE(peran, '')) ~* '\\y(wakil|asisten|assistant|vice|co-|sub-)\\y')
       AND COALESCE(status, 'Aktif') = 'Aktif'
       AND (selesai IS NULL OR selesai >= CURRENT_DATE)
@@ -3503,10 +3615,24 @@ router.post(
       return res.status(400).json({ message: "userId dan memberType wajib diisi." });
     }
 
+    const existingMember = await query(
+      "SELECT member_type, peran, status FROM research_memberships WHERE project_id = $1 AND user_id = $2 LIMIT 1",
+      [req.params.id, userId]
+    );
+
+    const isNew = existingMember.rowCount === 0;
+    const effectivePeran = await validateMemberRoleAssignment({
+      memberType,
+      peran,
+      isNew,
+      existingPeran: existingMember.rows[0]?.peran
+    });
+
     const ketuaConflictMessage = await ensureSingleKetuaPerScope({
       projectId: req.params.id,
+      userIdToExclude: userId,
       memberType,
-      peran
+      peran: effectivePeran
     });
     if (ketuaConflictMessage) {
       return res.status(400).json({ message: ketuaConflictMessage });
@@ -3519,24 +3645,27 @@ router.post(
       ON CONFLICT (project_id, user_id)
       DO UPDATE SET member_type = EXCLUDED.member_type,
                     peran = EXCLUDED.peran,
-                    status = EXCLUDED.status,
+                    status = CASE
+                      WHEN research_memberships.status = 'Nonaktif' AND $5 IS NULL THEN 'Nonaktif'
+                      ELSE EXCLUDED.status
+                    END,
                     bergabung = EXCLUDED.bergabung,
                     division_id = COALESCE(EXCLUDED.division_id, research_memberships.division_id)
       RETURNING project_id, user_id, member_type, peran, status, division_id
       `,
-      [req.params.id, userId, memberType, peran || null, status, bergabung || null, resolvedDivisionId]
+      [req.params.id, userId, memberType, effectivePeran, status, bergabung || null, resolvedDivisionId]
     );
 
     if (memberType === "Mahasiswa") {
       const studentRow = await query("SELECT id FROM students WHERE user_id = $1 LIMIT 1", [userId]);
       if (studentRow.rowCount > 0) {
         const studentId = studentRow.rows[0].id;
-        if (peran && !isGenericOrAlumniRole(peran)) {
+        if (effectivePeran && !isGenericOrAlumniRole(effectivePeran)) {
           await query(
             `UPDATE graduation_submission_projects
              SET position_label = $3
              WHERE student_id = $1 AND project_id = $2`,
-            [studentId, req.params.id, peran]
+            [studentId, req.params.id, effectivePeran]
           ).catch(() => {});
         }
         invalidateSpecificStudentResearchRolesCache();
@@ -3563,26 +3692,39 @@ router.patch(
     const { memberType, peran, status, bergabung, divisionId, division_id } = req.body;
     const resolvedDivisionId = divisionId !== undefined ? divisionId : (division_id !== undefined ? division_id : undefined);
 
-    if (peran !== undefined || memberType !== undefined) {
-      const existingMember = await query(
-        "SELECT member_type, peran FROM research_memberships WHERE project_id = $1 AND user_id = $2 LIMIT 1",
-        [req.params.id, req.params.userId]
-      );
-      const effectiveMemberType = memberType !== undefined
-        ? memberType
-        : existingMember.rows[0]?.member_type;
-      const effectivePeran = peran !== undefined
-        ? peran
-        : existingMember.rows[0]?.peran;
-      const ketuaConflictMessage = await ensureSingleKetuaPerScope({
-        projectId: req.params.id,
-        userIdToExclude: req.params.userId,
-        memberType: effectiveMemberType,
-        peran: effectivePeran
-      });
-      if (ketuaConflictMessage) {
-        return res.status(400).json({ message: ketuaConflictMessage });
+    const existingMember = await query(
+      "SELECT member_type, peran, status FROM research_memberships WHERE project_id = $1 AND user_id = $2 LIMIT 1",
+      [req.params.id, req.params.userId]
+    );
+    if (existingMember.rowCount === 0) {
+      return res.status(404).json({ message: "Anggota riset tidak ditemukan." });
+    }
+
+    const effectiveMemberType = memberType !== undefined
+      ? memberType
+      : existingMember.rows[0]?.member_type;
+
+    let targetPeran = existingMember.rows[0]?.peran;
+    if (peran !== undefined) {
+      if (typeof peran === "string" && !peran.trim()) {
+        return res.status(400).json({ message: "Peran riset tidak boleh dikosongkan." });
       }
+      targetPeran = await validateMemberRoleAssignment({
+        memberType: effectiveMemberType,
+        peran,
+        isNew: false,
+        existingPeran: existingMember.rows[0].peran
+      });
+    }
+
+    const ketuaConflictMessage = await ensureSingleKetuaPerScope({
+      projectId: req.params.id,
+      userIdToExclude: req.params.userId,
+      memberType: effectiveMemberType,
+      peran: targetPeran
+    });
+    if (ketuaConflictMessage) {
+      return res.status(400).json({ message: ketuaConflictMessage });
     }
 
     const result = await query(
@@ -3596,7 +3738,7 @@ router.patch(
       WHERE project_id = $1 AND user_id = $2
       RETURNING id, member_type, peran
       `,
-      [req.params.id, req.params.userId, memberType, peran, status, bergabung, resolvedDivisionId !== undefined, resolvedDivisionId || null]
+      [req.params.id, req.params.userId, memberType, targetPeran, status, bergabung, resolvedDivisionId !== undefined, resolvedDivisionId || null]
     );
 
     if (result.rowCount === 0) {
@@ -4297,5 +4439,9 @@ router.delete(
     res.json({ message: "Notulensi berhasil dihapus." });
   })
 );
+
+router._isKetuaPeran = isKetuaPeran;
+router._ensureSingleKetuaPerScope = ensureSingleKetuaPerScope;
+router._validateMemberRoleAssignment = validateMemberRoleAssignment;
 
 module.exports = router;
