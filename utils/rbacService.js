@@ -2576,18 +2576,63 @@ async function replaceAndArchiveRole(sourceRoleId, payload = {}, actorContext = 
       }
     }
 
-    // Validate scope compatibility
-    const replScopes = replacement.allowed_scope_types || ["LAB", "PROJECT", "DIVISION"];
+    // Build role cache and mapping map for per-student / per-assignment plotting
+    const targetRolesCache = new Map();
+    targetRolesCache.set(replacement.id, replacement);
+    targetRolesCache.set(replacement.code, replacement);
+
+    async function resolveTargetRole(roleIdOrCode) {
+      const key = String(roleIdOrCode).trim();
+      if (targetRolesCache.has(key)) return targetRolesCache.get(key);
+      const res = await client.query(
+        "SELECT * FROM rbac_roles WHERE id = $1 OR code = $1 FOR UPDATE",
+        [key]
+      );
+      if (res.rowCount === 0) {
+        throw createHttpError(`Role pengganti '${key}' tidak ditemukan.`, 404);
+      }
+      const r = res.rows[0];
+      if (r.id === source.id) {
+        throw createHttpError(`Role pengganti '${r.name}' tidak boleh sama dengan role sumber.`, 400);
+      }
+      if (!r.is_active) {
+        throw createHttpError(`Role pengganti '${r.name}' sedang dalam status nonaktif/diarsipkan.`, 400);
+      }
+      targetRolesCache.set(r.id, r);
+      targetRolesCache.set(r.code, r);
+      return r;
+    }
+
+    const assignmentMappingsMap = new Map();
+    if (Array.isArray(payload.assignmentMappings)) {
+      for (const m of payload.assignmentMappings) {
+        if (m && m.assignmentId && m.replacementRoleId) {
+          assignmentMappingsMap.set(String(m.assignmentId).trim(), String(m.replacementRoleId).trim());
+        }
+      }
+    }
+    if (Array.isArray(payload.studentMappings)) {
+      for (const m of payload.studentMappings) {
+        if (m && m.studentId && m.replacementRoleId) {
+          assignmentMappingsMap.set(String(m.studentId).trim(), String(m.replacementRoleId).trim());
+        }
+      }
+    }
+
+    // Validate scope compatibility for each assignment target role
     for (const a of assignments) {
+      const assignedRoleId = assignmentMappingsMap.get(a.id) || assignmentMappingsMap.get(a.student_id) || replacement.id;
+      const targetRole = await resolveTargetRole(assignedRoleId);
+      const replScopes = targetRole.allowed_scope_types || ["LAB", "PROJECT", "DIVISION"];
       if (!replScopes.includes(a.scope_type)) {
         throw createHttpError(
-          `Role pengganti '${replacement.name}' tidak mendukung scope ${a.scope_type} yang dimiliki oleh salah satu penugasan aktif.`,
+          `Role pengganti '${targetRole.name}' tidak mendukung scope ${a.scope_type} yang dimiliki oleh salah satu penugasan aktif mahasiswa.`,
           422
         );
       }
     }
 
-    // 3b. Validate permission delta: prevent silent privilege escalation
+    // 3b. Validate permission delta: prevent silent privilege escalation across all target roles
     const sourcePermsRes = await client.query(
       `
       SELECT p.code FROM rbac_role_permissions rp
@@ -2598,21 +2643,34 @@ async function replaceAndArchiveRole(sourceRoleId, payload = {}, actorContext = 
     );
     const sourcePerms = new Set(sourcePermsRes.rows.map((r) => r.code));
 
-    const replPermsRes = await client.query(
-      `
-      SELECT p.code FROM rbac_role_permissions rp
-      JOIN rbac_permissions p ON p.id = rp.permission_id
-      WHERE rp.role_id = $1
-      `,
-      [replacement.id]
-    );
-    const replacementPerms = replPermsRes.rows.map((r) => r.code);
-    const gainedPermissions = replacementPerms.filter((p) => !sourcePerms.has(p));
-    const lostPermissions = Array.from(sourcePerms).filter((p) => !replacementPerms.includes(p));
+    const allGainedPermissions = new Set();
+    const allLostPermissions = new Set();
+    const uniqueTargetRoles = Array.from(new Set(targetRolesCache.values()));
+
+    for (const tr of uniqueTargetRoles) {
+      const replPermsRes = await client.query(
+        `
+        SELECT p.code FROM rbac_role_permissions rp
+        JOIN rbac_permissions p ON p.id = rp.permission_id
+        WHERE rp.role_id = $1
+        `,
+        [tr.id]
+      );
+      const replacementPerms = replPermsRes.rows.map((r) => r.code);
+      for (const p of replacementPerms) {
+        if (!sourcePerms.has(p)) allGainedPermissions.add(p);
+      }
+      for (const p of sourcePerms) {
+        if (!replacementPerms.includes(p)) allLostPermissions.add(p);
+      }
+    }
+
+    const gainedPermissions = Array.from(allGainedPermissions);
+    const lostPermissions = Array.from(allLostPermissions);
 
     if (gainedPermissions.length > 0 && !payload.confirmPermissionGains) {
       throw createHttpError(
-        `Penggantian role ke '${replacement.name}' menyebabkan peningkatan hak akses (${gainedPermissions.length} permission baru: ${gainedPermissions.join(", ")}). Diperlukan konfirmasi eksplisit (confirmPermissionGains: true).`,
+        `Penggantian role menyebabkan peningkatan hak akses (${gainedPermissions.length} permission baru: ${gainedPermissions.join(", ")}). Diperlukan konfirmasi eksplisit (confirmPermissionGains: true).`,
         400
       );
     }
@@ -2622,7 +2680,10 @@ async function replaceAndArchiveRole(sourceRoleId, payload = {}, actorContext = 
     let duplicateAssignmentsSkipped = 0;
 
     for (const a of assignments) {
-      // Check if student already has active assignment for replacement role in same scope
+      const assignedRoleId = assignmentMappingsMap.get(a.id) || assignmentMappingsMap.get(a.student_id) || replacement.id;
+      const targetRole = await resolveTargetRole(assignedRoleId);
+
+      // Check if student already has active assignment for target role in same scope
       const dupRes = await client.query(
         `
         SELECT id FROM student_role_assignments
@@ -2632,7 +2693,7 @@ async function replaceAndArchiveRole(sourceRoleId, payload = {}, actorContext = 
           AND (expires_at IS NULL OR expires_at > NOW())
         LIMIT 1
         `,
-        [a.student_id, replacement.id, a.scope_type, a.scope_id]
+        [a.student_id, targetRole.id, a.scope_type, a.scope_id]
       );
 
       // Revoke source assignment with full audit trail
@@ -2649,7 +2710,7 @@ async function replaceAndArchiveRole(sourceRoleId, payload = {}, actorContext = 
         [
           a.id,
           actorContext.actorId || null,
-          `Digantikan oleh role '${replacement.name}' (${replacement.code}): ${reason}`
+          `Digantikan oleh role '${targetRole.name}' (${targetRole.code}): ${reason}`
         ]
       );
 
@@ -2669,7 +2730,7 @@ async function replaceAndArchiveRole(sourceRoleId, payload = {}, actorContext = 
           [
             newAssignId,
             a.student_id,
-            replacement.id,
+            targetRole.id,
             a.scope_type,
             a.scope_id,
             actorContext.actorId || null,
