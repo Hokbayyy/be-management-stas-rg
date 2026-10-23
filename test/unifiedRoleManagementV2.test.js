@@ -713,6 +713,71 @@ test("Unified Role Management V2 - 15 Test Scenarios", async (t) => {
     const checkMem2 = await pool.query("SELECT peran, status, bergabung FROM research_memberships WHERE project_id = 'PRJ-UAT-RBAC-1' AND user_id = 'USR-STD-UAT-1'");
     assert.equal(checkMem2.rows[0].peran, roleC.name);
     assert.equal(checkMem2.rows[0].status, "Aktif");
+
+    // 13.3 Multiple students plotted to DIFFERENT roles via membershipMappings
+    const roleD = await createRole({ code: `LBL_D_${timestamp}`, name: `Label D ${timestamp}`, category: "FUNCTIONAL", allowedScopeTypes: ["PROJECT"] }, actorContext, pool);
+    const roleE = await createRole({ code: `LBL_E_${timestamp}`, name: `Label E ${timestamp}`, category: "FUNCTIONAL", allowedScopeTypes: ["PROJECT"] }, actorContext, pool);
+    const roleDivOnly = await createRole({ code: `DIV_ONLY_${timestamp}`, name: `Div Only ${timestamp}`, category: "DIVISION", allowedScopeTypes: ["DIVISION"] }, actorContext, pool);
+
+    // Insert 2 memberships with roleC.name
+    await pool.query(`
+      INSERT INTO research_memberships (project_id, user_id, member_type, peran, status, bergabung)
+      VALUES ('PRJ-UAT-RBAC-1', 'USR-STD-UAT-1', 'Mahasiswa', $1, 'Aktif', '2026-01-01')
+      ON CONFLICT (project_id, user_id) DO UPDATE SET peran = EXCLUDED.peran
+    `, [roleC.name]);
+
+    await pool.query(`
+      INSERT INTO research_memberships (project_id, user_id, member_type, peran, status, bergabung)
+      VALUES ('PRJ-UAT-RBAC-1', 'USR-STD-UAT-2', 'Mahasiswa', $1, 'Aktif', '2026-01-01')
+      ON CONFLICT (project_id, user_id) DO UPDATE SET peran = EXCLUDED.peran
+    `, [roleC.name]);
+
+    const memRows = await pool.query("SELECT id, user_id FROM research_memberships WHERE project_id = 'PRJ-UAT-RBAC-1' AND user_id IN ('USR-STD-UAT-1', 'USR-STD-UAT-2')");
+    const mem1 = memRows.rows.find((r) => r.user_id === 'USR-STD-UAT-1');
+    const mem2 = memRows.rows.find((r) => r.user_id === 'USR-STD-UAT-2');
+
+    // 13.3.a Scope incompatibility rejection (roleDivOnly does not support PROJECT)
+    await assert.rejects(
+      async () => {
+        await replaceAndArchiveRole(
+          roleC.id,
+          {
+            replacementRoleId: roleD.id,
+            sourceVersion: roleC.version,
+            reason: "Reject invalid scope for membership mapping",
+            membershipMappings: [
+              { membershipId: mem1.id, replacementRoleId: roleDivOnly.id }
+            ]
+          },
+          actorContext,
+          pool
+        );
+      },
+      (err) => err.statusCode === 422 && err.message.includes("tidak mendukung scope PROJECT")
+    );
+
+    // 13.3.b Successful replace with individual membership mappings:
+    // mem1 -> roleD, mem2 -> roleE
+    await replaceAndArchiveRole(
+      roleC.id,
+      {
+        replacementRoleId: roleD.id,
+        sourceVersion: roleC.version,
+        reason: "Plot students to different roles individually",
+        membershipMappings: [
+          { membershipId: mem1.id, replacementRoleId: roleD.id },
+          { membershipId: mem2.id, replacementRoleId: roleE.id }
+        ]
+      },
+      actorContext,
+      pool
+    );
+
+    const checkMem3 = await pool.query("SELECT id, user_id, peran FROM research_memberships WHERE id IN ($1, $2)", [mem1.id, mem2.id]);
+    const resMem1 = checkMem3.rows.find((r) => r.id === mem1.id);
+    const resMem2 = checkMem3.rows.find((r) => r.id === mem2.id);
+    assert.equal(resMem1.peran, roleD.name);
+    assert.equal(resMem2.peran, roleE.name);
   });
 
   // Scenario 14: Canonical seed tidak mereset perubahan role (custom metadata / permissions)

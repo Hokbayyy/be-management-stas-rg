@@ -2619,6 +2619,15 @@ async function replaceAndArchiveRole(sourceRoleId, payload = {}, actorContext = 
       }
     }
 
+    const membershipMappingsMap = new Map();
+    if (Array.isArray(payload.membershipMappings)) {
+      for (const m of payload.membershipMappings) {
+        if (m && m.membershipId && m.replacementRoleId) {
+          membershipMappingsMap.set(String(m.membershipId).trim(), String(m.replacementRoleId).trim());
+        }
+      }
+    }
+
     // Validate scope compatibility for each assignment target role
     for (const a of assignments) {
       const assignedRoleId = assignmentMappingsMap.get(a.id) || assignmentMappingsMap.get(a.student_id) || replacement.id;
@@ -2629,6 +2638,43 @@ async function replaceAndArchiveRole(sourceRoleId, payload = {}, actorContext = 
           `Role pengganti '${targetRole.name}' tidak mendukung scope ${a.scope_type} yang dimiliki oleh salah satu penugasan aktif mahasiswa.`,
           422
         );
+      }
+    }
+
+    // Validate scope compatibility for each membership target role
+    for (const [memId, roleId] of membershipMappingsMap) {
+      const targetRole = await resolveTargetRole(roleId);
+      const replScopes = targetRole.allowed_scope_types || ["LAB", "PROJECT", "DIVISION"];
+      if (!replScopes.includes("PROJECT")) {
+        throw createHttpError(
+          `Role pengganti '${targetRole.name}' tidak mendukung scope PROJECT untuk keanggotaan riset.`,
+          422
+        );
+      }
+    }
+
+    if (migrateMembershipLabels) {
+      const replScopes = replacement.allowed_scope_types || ["LAB", "PROJECT", "DIVISION"];
+      if (!replScopes.includes("PROJECT")) {
+        const memCountRes = await client.query(
+          `
+          SELECT COUNT(*)::int AS count
+          FROM research_memberships
+          WHERE member_type = 'Mahasiswa'
+            AND (
+              LOWER(TRIM(peran)) = LOWER(TRIM($1))
+              OR LOWER(TRIM(peran)) = LOWER(TRIM($2))
+            )
+          `,
+          [source.name, source.code]
+        );
+        const totalMemCount = memCountRes.rows[0]?.count || 0;
+        if (totalMemCount > membershipMappingsMap.size) {
+          throw createHttpError(
+            `Role pengganti default '${replacement.name}' tidak mendukung scope PROJECT untuk keanggotaan riset yang belum dipetakan.`,
+            422
+          );
+        }
       }
     }
 
@@ -2741,22 +2787,52 @@ async function replaceAndArchiveRole(sourceRoleId, payload = {}, actorContext = 
       }
     }
 
-    // 5. Update research_memberships.peran ONLY IF explicitly requested
+    // 5. Update research_memberships.peran ONLY IF explicitly requested or if membershipMappings are provided
     let membershipLabelsUpdated = 0;
-    if (migrateMembershipLabels) {
-      const updateMemRes = await client.query(
-        `
-        UPDATE research_memberships
-        SET peran = $1
-        WHERE member_type = 'Mahasiswa'
-          AND (
-            LOWER(TRIM(peran)) = LOWER(TRIM($2))
-            OR LOWER(TRIM(peran)) = LOWER(TRIM($3))
-          )
-        `,
-        [replacement.name, source.name, source.code]
-      );
-      membershipLabelsUpdated = updateMemRes.rowCount;
+    const shouldMigrateMemberships = Boolean(migrateMembershipLabels || membershipMappingsMap.size > 0);
+    if (shouldMigrateMemberships) {
+      const mappedMembershipIds = [];
+      if (membershipMappingsMap.size > 0) {
+        for (const [memId, trId] of membershipMappingsMap) {
+          const targetRole = await resolveTargetRole(trId);
+          const updateSingleRes = await client.query(
+            `
+            UPDATE research_memberships
+            SET peran = $1
+            WHERE id = $2::bigint
+              AND member_type = 'Mahasiswa'
+              AND (
+                LOWER(TRIM(peran)) = LOWER(TRIM($3))
+                OR LOWER(TRIM(peran)) = LOWER(TRIM($4))
+              )
+            `,
+            [targetRole.name, memId, source.name, source.code]
+          );
+          if (updateSingleRes.rowCount > 0) {
+            membershipLabelsUpdated += updateSingleRes.rowCount;
+            mappedMembershipIds.push(memId);
+          }
+        }
+      }
+
+      if (migrateMembershipLabels) {
+        let updateRemainingQuery = `
+          UPDATE research_memberships
+          SET peran = $1
+          WHERE member_type = 'Mahasiswa'
+            AND (
+              LOWER(TRIM(peran)) = LOWER(TRIM($2))
+              OR LOWER(TRIM(peran)) = LOWER(TRIM($3))
+            )
+        `;
+        const queryParams = [replacement.name, source.name, source.code];
+        if (mappedMembershipIds.length > 0) {
+          updateRemainingQuery += " AND NOT (id = ANY($4::bigint[]))";
+          queryParams.push(mappedMembershipIds.map((id) => Number(id)));
+        }
+        const updateRemainingRes = await client.query(updateRemainingQuery, queryParams);
+        membershipLabelsUpdated += updateRemainingRes.rowCount;
+      }
     }
 
     // 6. Archive source role
