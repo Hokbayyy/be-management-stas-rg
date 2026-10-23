@@ -1,0 +1,113 @@
+name: Backend CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  ci:
+    name: Test & Verify (CI)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: stasrg_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Whitespace & Syntax Check
+        run: git diff --check
+
+      - name: Run Database Migrations
+        env:
+          DATABASE_URL: postgres://test_user:test_password@localhost:5432/stasrg_test
+          NODE_ENV: test
+        run: node db/autoMigrate.js
+
+      - name: Run Test Suite
+        env:
+          DATABASE_URL: postgres://test_user:test_password@localhost:5432/stasrg_test
+          NODE_ENV: test
+        run: |
+          node --test test/studentRoleSyncValidation.test.js test/unifiedRoleManagementV2.test.js
+
+  cd:
+    name: Deploy to VPS (CD)
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Execute Remote Deployment via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER_BE || secrets.VPS_USER || 'root' }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || '22' }}
+          script_stop: true
+          script: |
+            cd /home/stas-rg-ms-api/htdocs/be-management-stas-rg
+            
+            # 1. Catat commit saat ini untuk fallback jika gagal
+            PREV_COMMIT=$(git rev-parse HEAD)
+            echo "Current Commit: $PREV_COMMIT"
+            
+            # 2. Tarik kode terbaru
+            git fetch origin main
+            git reset --hard origin/main
+            
+            # 3. Install production dependencies
+            npm ci --omit=dev
+            
+            # 4. Graceful Zero-Downtime Reload via PM2
+            if [ "$(id -u)" -eq 0 ]; then
+              chown -R stas-rg-ms-api:stas-rg-ms-api /home/stas-rg-ms-api/htdocs/be-management-stas-rg
+              su - stas-rg-ms-api -c "pm2 reload management-api --update-env" || pm2 reload management-api --update-env
+            else
+              pm2 reload management-api --update-env
+            fi
+            
+            # 5. Health Check Post-Deploy
+            echo "Checking API Health..."
+            sleep 3
+            HEALTH=$(curl -s http://127.0.0.1:3000/api/v1/health || curl -s https://ms-api.stas-rg.com/api/v1/health)
+            echo "Health Response: $HEALTH"
+            
+            if ! echo "$HEALTH" | grep -q '"ok":true'; then
+              echo "Health check failed! Rolling back to $PREV_COMMIT..."
+              git reset --hard $PREV_COMMIT
+              npm ci --omit=dev
+              if [ "$(id -u)" -eq 0 ]; then
+                chown -R stas-rg-ms-api:stas-rg-ms-api /home/stas-rg-ms-api/htdocs/be-management-stas-rg
+                su - stas-rg-ms-api -c "pm2 reload management-api" || pm2 reload management-api
+              else
+                pm2 reload management-api
+              fi
+              exit 1
+            fi
+            
+            echo "Backend successfully deployed and verified healthy!"

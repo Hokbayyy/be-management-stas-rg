@@ -367,9 +367,13 @@ async function syncStudentResearchMemberships({ userId, studentStatus = null, re
     `
   );
   const activeRoleNames = new Set();
+  let canonicalContributorName = null;
   for (const r of activeRolesRes.rows) {
     if (r.name) activeRoleNames.add(r.name.trim().toLowerCase());
     if (r.code) activeRoleNames.add(r.code.trim().toLowerCase());
+    if (r.code === "CONTRIBUTOR" && r.name) {
+      canonicalContributorName = r.name.trim();
+    }
   }
 
   // 3. Validate each submitted role
@@ -396,8 +400,16 @@ async function syncStudentResearchMemberships({ userId, studentStatus = null, re
       continue;
     }
 
+    const lowerPeran = rawPeran.toLowerCase();
+    // Resolve legacy contributor aliases ('anggota', 'member', 'anggota riset') to active CONTRIBUTOR role
+    const LEGACY_CONTRIBUTOR_ALIASES = new Set(["anggota", "member", "anggota riset"]);
+    if (LEGACY_CONTRIBUTOR_ALIASES.has(lowerPeran) && canonicalContributorName) {
+      item.peran = canonicalContributorName;
+      continue;
+    }
+
     // New assignment or changed role must be an active PROJECT-eligible role
-    if (!activeRoleNames.has(rawPeran.toLowerCase())) {
+    if (!activeRoleNames.has(lowerPeran)) {
       const err = new Error(`Peran "${rawPeran}" tidak aktif atau tidak diizinkan untuk mahasiswa.`);
       err.status = 400;
       err.statusCode = 400;

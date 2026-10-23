@@ -206,6 +206,21 @@ test("STUDENT ROLE SYNC VALIDATION: syncStudentResearchMemberships enforces acti
       });
       assert.equal(validRole, "Contributor / Member");
 
+      // Legacy contributor aliases ('Anggota', 'member') resolve to active Contributor / Member
+      const anggotaResolved = await validateMemberRoleAssignment({
+        memberType: "Mahasiswa",
+        peran: "Anggota",
+        isNew: true
+      });
+      assert.equal(anggotaResolved, "Contributor / Member");
+
+      const memberResolved = await validateMemberRoleAssignment({
+        memberType: "Mahasiswa",
+        peran: "member",
+        isNew: true
+      });
+      assert.equal(memberResolved, "Contributor / Member");
+
       // Inactive / uncataloged role rejected
       await assert.rejects(
         async () => {

@@ -29,7 +29,7 @@ const {
   buildId
 } = require("../utils/rbacService");
 
-test("Unified Role Management V2 - 15 Test Scenarios", async (t) => {
+test("Unified Role Management V2 - 16 Test Scenarios", async (t) => {
   if (!dbUrl) {
     t.skip("Database URL not found in .env.test.local or process.env. Skipping integration suite.");
     return;
@@ -833,5 +833,299 @@ test("Unified Role Management V2 - 15 Test Scenarios", async (t) => {
       assert.equal(r.category, "SYSTEM");
       assert.ok(r.allowedScopeTypes.includes("PROJECT"));
     }
+  });
+
+  // Scenario 16: Individual Student Role Plotting in replaceAndArchiveRole (7 regression sub-scenarios)
+  await t.test("16. Individual Student Role Plotting in replaceAndArchiveRole (7 regression sub-scenarios)", async () => {
+    const timestamp = Date.now();
+
+    // Setup 5 student users
+    for (let i = 1; i <= 5; i++) {
+      await pool.query(`
+        INSERT INTO users (id, name, initials, role)
+        VALUES ($1, $2, $3, 'mahasiswa')
+        ON CONFLICT (id) DO NOTHING
+      `, [`USR-STD-REG-${i}`, `Student Regression ${i}`, `SR${i}`]);
+      await pool.query(`
+        INSERT INTO students (id, user_id, nim, tipe, status)
+        VALUES ($1, $2, $3, 'Riset', 'Aktif')
+        ON CONFLICT (id) DO NOTHING
+      `, [`STD-REG-${i}`, `USR-STD-REG-${i}`, `NIM-REG-${i}`]);
+    }
+
+    // 16.1. 5 mahasiswa dengan role lama sama dipetakan ke 5 role baru berbeda
+    const roleSrc1 = await createRole({ code: `SRC_R1_${timestamp}`, name: `Src Role 1 ${timestamp}`, category: "FUNCTIONAL", allowedScopeTypes: ["PROJECT"] }, actorContext, pool);
+    const tgtRoles = [];
+    for (let i = 1; i <= 5; i++) {
+      const r = await createRole({ code: `TGT_R1_${i}_${timestamp}`, name: `Tgt Role ${i} ${timestamp}`, category: "FUNCTIONAL", allowedScopeTypes: ["PROJECT"] }, actorContext, pool);
+      tgtRoles.push(r);
+    }
+
+    // Insert 5 memberships for PRJ-UAT-RBAC-1
+    for (let i = 1; i <= 5; i++) {
+      await pool.query(`
+        INSERT INTO research_memberships (project_id, user_id, member_type, peran, status, bergabung)
+        VALUES ('PRJ-UAT-RBAC-1', $1, 'Mahasiswa', $2, 'Aktif', '2026-01-01')
+        ON CONFLICT (project_id, user_id) DO UPDATE SET peran = EXCLUDED.peran, status = EXCLUDED.status
+      `, [`USR-STD-REG-${i}`, roleSrc1.name]);
+    }
+
+    const memRows1 = await pool.query(
+      "SELECT id, user_id FROM research_memberships WHERE project_id = 'PRJ-UAT-RBAC-1' AND user_id LIKE 'USR-STD-REG-%' ORDER BY user_id ASC"
+    );
+    const mapping1 = memRows1.rows.map((row, idx) => ({
+      membershipId: row.id,
+      replacementRoleId: tgtRoles[idx].id
+    }));
+
+    const res1 = await replaceAndArchiveRole(
+      roleSrc1.id,
+      {
+        sourceVersion: roleSrc1.version,
+        reason: "5 students mapped to 5 distinct roles",
+        membershipMappings: mapping1
+      },
+      actorContext,
+      pool
+    );
+
+    assert.equal(res1.migratedMembershipsCount, 5);
+    assert.equal(res1.unmodifiedMembershipsCount, 0);
+    assert.equal(res1.appliedMembershipMappings.length, 5);
+
+    for (let i = 1; i <= 5; i++) {
+      const check = await pool.query("SELECT peran FROM research_memberships WHERE project_id = 'PRJ-UAT-RBAC-1' AND user_id = $1", [`USR-STD-REG-${i}`]);
+      assert.equal(check.rows[0].peran, tgtRoles[i - 1].name);
+    }
+
+    // 16.2. Sebagian mahasiswa dipetakan, sebagian dipertahankan (tidak diubah) & status Nonaktif preserved
+    const roleSrc2 = await createRole({ code: `SRC_R2_${timestamp}`, name: `Src Role 2 ${timestamp}`, category: "FUNCTIONAL", allowedScopeTypes: ["PROJECT"] }, actorContext, pool);
+    // Students 1 & 2 Aktif, Students 3 & 4 Nonaktif
+    await pool.query("UPDATE research_memberships SET peran = $1, status = 'Aktif' WHERE project_id = 'PRJ-UAT-RBAC-1' AND user_id IN ('USR-STD-REG-1', 'USR-STD-REG-2')", [roleSrc2.name]);
+    await pool.query("UPDATE research_memberships SET peran = $1, status = 'Nonaktif' WHERE project_id = 'PRJ-UAT-RBAC-1' AND user_id IN ('USR-STD-REG-3', 'USR-STD-REG-4')", [roleSrc2.name]);
+
+    const memRows2 = await pool.query(
+      "SELECT id, user_id, status FROM research_memberships WHERE project_id = 'PRJ-UAT-RBAC-1' AND user_id IN ('USR-STD-REG-1', 'USR-STD-REG-2', 'USR-STD-REG-3', 'USR-STD-REG-4')"
+    );
+    const mem1 = memRows2.rows.find(r => r.user_id === 'USR-STD-REG-1');
+    const mem3 = memRows2.rows.find(r => r.user_id === 'USR-STD-REG-3');
+
+    // Only map mem1 (Aktif) and mem3 (Nonaktif) to tgtRoles[0]; leave mem2 and mem4 unmapped
+    const res2 = await replaceAndArchiveRole(
+      roleSrc2.id,
+      {
+        sourceVersion: roleSrc2.version,
+        reason: "Partial mapping, partial retain",
+        membershipMappings: [
+          { membershipId: mem1.id, replacementRoleId: tgtRoles[0].id },
+          { membershipId: mem3.id, replacementRoleId: tgtRoles[1].id }
+        ]
+      },
+      actorContext,
+      pool
+    );
+
+    assert.equal(res2.migratedMembershipsCount, 2);
+    assert.equal(res2.unmodifiedMembershipsCount, 2);
+
+    // Verify mapped memberships changed role, but their status is unchanged
+    const check1 = await pool.query("SELECT peran, status FROM research_memberships WHERE id = $1", [mem1.id]);
+    assert.equal(check1.rows[0].peran, tgtRoles[0].name);
+    assert.equal(check1.rows[0].status, "Aktif");
+
+    const check3 = await pool.query("SELECT peran, status FROM research_memberships WHERE id = $1", [mem3.id]);
+    assert.equal(check3.rows[0].peran, tgtRoles[1].name);
+    assert.equal(check3.rows[0].status, "Nonaktif", "Nonaktif status must be preserved");
+
+    // Verify unmapped memberships still retain old role and their status
+    const mem2Row = memRows2.rows.find(r => r.user_id === 'USR-STD-REG-2');
+    const mem4Row = memRows2.rows.find(r => r.user_id === 'USR-STD-REG-4');
+    const check2 = await pool.query("SELECT peran, status FROM research_memberships WHERE id = $1", [mem2Row.id]);
+    assert.equal(check2.rows[0].peran, roleSrc2.name, "Unmapped member must retain old role");
+    assert.equal(check2.rows[0].status, "Aktif");
+
+    const check4 = await pool.query("SELECT peran, status FROM research_memberships WHERE id = $1", [mem4Row.id]);
+    assert.equal(check4.rows[0].peran, roleSrc2.name, "Unmapped member must retain old role");
+    assert.equal(check4.rows[0].status, "Nonaktif");
+
+    // 16.3. Satu mahasiswa memiliki keanggotaan di beberapa proyek dengan penanganan role berbeda
+    const roleSrc3 = await createRole({ code: `SRC_R3_${timestamp}`, name: `Src Role 3 ${timestamp}`, category: "FUNCTIONAL", allowedScopeTypes: ["PROJECT"] }, actorContext, pool);
+    // Student 1 in PRJ-UAT-RBAC-1 and PRJ-UAT-RBAC-2
+    await pool.query(`
+      INSERT INTO research_memberships (project_id, user_id, member_type, peran, status, bergabung)
+      VALUES ('PRJ-UAT-RBAC-2', 'USR-STD-REG-1', 'Mahasiswa', $1, 'Aktif', '2026-01-01')
+      ON CONFLICT (project_id, user_id) DO UPDATE SET peran = EXCLUDED.peran
+    `, [roleSrc3.name]);
+    await pool.query("UPDATE research_memberships SET peran = $1 WHERE project_id = 'PRJ-UAT-RBAC-1' AND user_id = 'USR-STD-REG-1'", [roleSrc3.name]);
+
+    const memP1 = (await pool.query("SELECT id FROM research_memberships WHERE project_id = 'PRJ-UAT-RBAC-1' AND user_id = 'USR-STD-REG-1'")).rows[0];
+    const memP2 = (await pool.query("SELECT id FROM research_memberships WHERE project_id = 'PRJ-UAT-RBAC-2' AND user_id = 'USR-STD-REG-1'")).rows[0];
+
+    // Map P1 to tgtRoles[0], and P2 to tgtRoles[1]
+    await replaceAndArchiveRole(
+      roleSrc3.id,
+      {
+        sourceVersion: roleSrc3.version,
+        reason: "Multi-project student with different target roles",
+        membershipMappings: [
+          { membershipId: memP1.id, replacementRoleId: tgtRoles[0].id },
+          { membershipId: memP2.id, replacementRoleId: tgtRoles[1].id }
+        ]
+      },
+      actorContext,
+      pool
+    );
+
+    const checkMultiP1 = await pool.query("SELECT peran FROM research_memberships WHERE id = $1", [memP1.id]);
+    const checkMultiP2 = await pool.query("SELECT peran FROM research_memberships WHERE id = $1", [memP2.id]);
+    assert.equal(checkMultiP1.rows[0].peran, tgtRoles[0].name);
+    assert.equal(checkMultiP2.rows[0].peran, tgtRoles[1].name);
+
+    // 16.4. Penolakan role tidak eligible (scope LAB saja, DIVISION saja, archived, role dosen)
+    const roleLabOnly = await createRole({ code: `LAB_ONLY_${timestamp}`, name: `Lab Only ${timestamp}`, category: "FUNCTIONAL", allowedScopeTypes: ["LAB"] }, actorContext, pool);
+    const roleDiv = await createRole({ code: `DIV_R_${timestamp}`, name: `Div Role ${timestamp}`, category: "DIVISION", allowedScopeTypes: ["DIVISION"] }, actorContext, pool);
+    const roleArchived = await createRole({ code: `ARCH_R_${timestamp}`, name: `Archived Role ${timestamp}`, category: "FUNCTIONAL", allowedScopeTypes: ["PROJECT"] }, actorContext, pool);
+    await archiveRole(roleArchived.id, actorContext, pool);
+    const roleDosen = await getRoleByCode("KETUA_RISET", pool);
+
+    const roleSrc4 = await createRole({ code: `SRC_R4_${timestamp}`, name: `Src Role 4 ${timestamp}`, category: "FUNCTIONAL", allowedScopeTypes: ["PROJECT"] }, actorContext, pool);
+    await pool.query("UPDATE research_memberships SET peran = $1 WHERE id = $2", [roleSrc4.name, memP1.id]);
+
+    // Test LAB only rejection
+    await assert.rejects(
+      async () => {
+        await replaceAndArchiveRole(roleSrc4.id, {
+          sourceVersion: roleSrc4.version,
+          reason: "Reject LAB scope",
+          membershipMappings: [{ membershipId: memP1.id, replacementRoleId: roleLabOnly.id }]
+        }, actorContext, pool);
+      },
+      (err) => err.statusCode === 422 && err.message.includes("tidak mendukung scope PROJECT")
+    );
+
+    // Test DIVISION rejection
+    await assert.rejects(
+      async () => {
+        await replaceAndArchiveRole(roleSrc4.id, {
+          sourceVersion: roleSrc4.version,
+          reason: "Reject DIVISION category",
+          membershipMappings: [{ membershipId: memP1.id, replacementRoleId: roleDiv.id }]
+        }, actorContext, pool);
+      },
+      (err) => err.statusCode === 422 && err.message.includes("tidak mendukung scope PROJECT")
+    );
+
+    // Test Archived rejection
+    await assert.rejects(
+      async () => {
+        await replaceAndArchiveRole(roleSrc4.id, {
+          sourceVersion: roleSrc4.version,
+          reason: "Reject archived role",
+          membershipMappings: [{ membershipId: memP1.id, replacementRoleId: roleArchived.id }]
+        }, actorContext, pool);
+      },
+      (err) => (err.statusCode === 400 || err.statusCode === 422) && err.message.includes("nonaktif/diarsipkan")
+    );
+
+    // Test Dosen role rejection
+    if (roleDosen) {
+      await assert.rejects(
+        async () => {
+          await replaceAndArchiveRole(roleSrc4.id, {
+            sourceVersion: roleSrc4.version,
+            reason: "Reject lecturer role",
+            membershipMappings: [{ membershipId: memP1.id, replacementRoleId: roleDosen.id }]
+          }, actorContext, pool);
+        },
+        (err) => err.statusCode === 422 && err.message.includes("khusus Dosen")
+      );
+    }
+
+    // 16.5. Penolakan jika terjadi konflik single leader pada proyek yang sama
+    const roleLeader = await getRoleByCode("PROJECT_MANAGER", pool);
+    assert.ok(roleLeader, "PROJECT_MANAGER role must exist");
+
+    // 16.5.a Dua mahasiswa dalam satu batch dipetakan menjadi Project Manager di proyek yang sama
+    await pool.query("UPDATE research_memberships SET peran = $1 WHERE project_id = 'PRJ-UAT-RBAC-1' AND user_id IN ('USR-STD-REG-1', 'USR-STD-REG-2')", [roleSrc4.name]);
+    const memL1 = (await pool.query("SELECT id FROM research_memberships WHERE project_id = 'PRJ-UAT-RBAC-1' AND user_id = 'USR-STD-REG-1'")).rows[0];
+    const memL2 = (await pool.query("SELECT id FROM research_memberships WHERE project_id = 'PRJ-UAT-RBAC-1' AND user_id = 'USR-STD-REG-2'")).rows[0];
+
+    await assert.rejects(
+      async () => {
+        await replaceAndArchiveRole(roleSrc4.id, {
+          sourceVersion: roleSrc4.version,
+          reason: "Batch double leader conflict",
+          membershipMappings: [
+            { membershipId: memL1.id, replacementRoleId: roleLeader.id },
+            { membershipId: memL2.id, replacementRoleId: roleLeader.id }
+          ]
+        }, actorContext, pool);
+      },
+      (err) => err.statusCode === 422 && err.message.includes("Konflik single leader")
+    );
+
+    // 16.5.b Proyek sudah memiliki leader aktif di DB, mencoba memetakan mahasiswa lain menjadi leader
+    // Set USR-STD-REG-1 as PM in DB first
+    await pool.query("UPDATE research_memberships SET peran = 'Project Manager' WHERE id = $1", [memL1.id]);
+    await pool.query("UPDATE research_memberships SET peran = $1 WHERE id = $2", [roleSrc4.name, memL2.id]);
+
+    await assert.rejects(
+      async () => {
+        await replaceAndArchiveRole(roleSrc4.id, {
+          sourceVersion: roleSrc4.version,
+          reason: "Existing leader conflict",
+          membershipMappings: [
+            { membershipId: memL2.id, replacementRoleId: roleLeader.id }
+          ]
+        }, actorContext, pool);
+      },
+      (err) => err.statusCode === 422 && err.message.includes("sudah memiliki Project Manager / Ketua Riset")
+    );
+
+    // Reset memL1 away from PM
+    await pool.query("UPDATE research_memberships SET peran = $1 WHERE id = $2", [roleSrc4.name, memL1.id]);
+
+    // 16.6. Rollback saat terjadi kegagalan di tengah transaksi
+    // Batch has memL1 (valid) and invalid mapping (e.g. non-existent membershipId)
+    await assert.rejects(
+      async () => {
+        await replaceAndArchiveRole(roleSrc4.id, {
+          sourceVersion: roleSrc4.version,
+          reason: "Rollback test",
+          membershipMappings: [
+            { membershipId: memL1.id, replacementRoleId: tgtRoles[0].id },
+            { membershipId: "99999999", replacementRoleId: tgtRoles[1].id }
+          ]
+        }, actorContext, pool);
+      },
+      (err) => err.statusCode === 404
+    );
+    // Verify memL1 was NOT updated due to rollback
+    const checkRollback = await pool.query("SELECT peran FROM research_memberships WHERE id = $1", [memL1.id]);
+    assert.equal(checkRollback.rows[0].peran, roleSrc4.name, "Transaction must rollback on error");
+    const checkRoleArchived = await getRoleById(roleSrc4.id, pool);
+    assert.equal(checkRoleArchived.isActive, true, "Source role must not be archived if transaction rolled back");
+
+    // 16.7. Pemisahan jelas antara RBAC assignment vs label research_memberships
+    // Role with 0 RBAC assignments does not require replacementRoleId
+    const resSeparation = await replaceAndArchiveRole(roleSrc4.id, {
+      sourceVersion: roleSrc4.version,
+      reason: "Separation test: only memberships mapped, replacementRoleId omitted",
+      membershipMappings: [
+        { membershipId: memL1.id, replacementRoleId: tgtRoles[0].id }
+      ]
+    }, actorContext, pool);
+
+    assert.equal(resSeparation.migratedMembershipsCount, 1);
+    assert.equal(resSeparation.migratedAssignmentsCount, 0);
+
+    // Verify student_role_assignments has NO spurious records created
+    const spuriousCheck = await pool.query("SELECT * FROM student_role_assignments WHERE role_id IN ($1, $2)", [roleSrc4.id, tgtRoles[0].id]);
+    assert.equal(spuriousCheck.rowCount, 0, "No RBAC assignment records should be created for membership label plotting");
+
+    // Clean up test data
+    await pool.query("DELETE FROM research_memberships WHERE user_id LIKE 'USR-STD-REG-%'");
+    await pool.query("DELETE FROM students WHERE id LIKE 'STD-REG-%'");
+    await pool.query("DELETE FROM users WHERE id LIKE 'USR-STD-REG-%'");
   });
 });
