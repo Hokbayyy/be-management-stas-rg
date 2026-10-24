@@ -267,6 +267,31 @@ test("STUDENT ROLE SYNC VALIDATION: syncStudentResearchMemberships enforces acti
       assert.equal(preserved, "QA");
     });
 
+    // Subtest 9: getRoleRetirementImpact allows null replacementRoleId when active assignments count is 0
+    await t.test("getRoleRetirementImpact allows null replacementRoleId when active assignments count is 0", async () => {
+      const { getRoleRetirementImpact, createRole } = require("../utils/rbacService");
+      const testRole = await createRole(
+        {
+          code: `TEST_RETIRE_${Date.now()}`,
+          name: `Test Retire ${Date.now()}`,
+          category: "FUNCTIONAL",
+          allowedScopeTypes: ["PROJECT"]
+        },
+        { actorId: userId, actorRole: "ADMIN" },
+        client
+      );
+
+      // 0 assignments, replacementRoleId is null
+      const impact = await getRoleRetirementImpact(testRole.id, null, client);
+      assert.equal(impact.activeAssignmentsCount, 0);
+      assert.equal(impact.replacementRole, null);
+      assert.equal(impact.canProceed, true);
+      assert.equal(
+        impact.blockingIssues.some((issue) => issue.includes("replacementRoleId")),
+        false
+      );
+    });
+
   } finally {
     await client.query("ROLLBACK");
     client.release();

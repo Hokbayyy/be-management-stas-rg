@@ -2302,6 +2302,7 @@ async function getRoleRetirementImpact(sourceRoleId, replacementRoleId = null, e
   // 4. Relevant evaluation role mappings
   let evaluationRoleMappings = [];
   try {
+    await runQuery(executor, "SAVEPOINT eval_role_check");
     const evalRes = await runQuery(
       executor,
       `
@@ -2312,7 +2313,11 @@ async function getRoleRetirementImpact(sourceRoleId, replacementRoleId = null, e
       [sourceRole.name, sourceRole.code]
     );
     evaluationRoleMappings = evalRes.rows;
+    await runQuery(executor, "RELEASE SAVEPOINT eval_role_check");
   } catch (err) {
+    try {
+      await runQuery(executor, "ROLLBACK TO SAVEPOINT eval_role_check");
+    } catch (rbErr) {}
     // Optional table or schema difference
   }
 
@@ -2385,7 +2390,9 @@ async function getRoleRetirementImpact(sourceRoleId, replacementRoleId = null, e
     blockingIssues.push("Role sistem dilindungi (protected canonical role) tidak dapat digantikan atau diarsipkan.");
   }
   if (!replacementRole) {
-    blockingIssues.push("Role pengganti (replacementRoleId) belum dipilih.");
+    if (activeAssignmentsCount > 0) {
+      blockingIssues.push("Role pengganti (replacementRoleId) belum dipilih untuk penugasan aktif.");
+    }
   } else {
     if (replacementRole.id === sourceRole.id) {
       blockingIssues.push("Role pengganti tidak boleh sama dengan role sumber.");
@@ -2453,7 +2460,7 @@ async function getRoleRetirementImpact(sourceRoleId, replacementRoleId = null, e
     },
     duplicateAssignments,
     blockingIssues,
-    canProceed: blockingIssues.length === 0 && Boolean(replacementRole)
+    canProceed: blockingIssues.length === 0 && (activeAssignmentsCount === 0 || Boolean(replacementRole))
   };
 }
 
