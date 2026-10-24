@@ -9,7 +9,7 @@ const {
   resolveSortColumn,
   resolveSortDirection
 } = require("../../utils/securityValidation");
-const { getJakartaWeekBounds } = require("../../utils/jakartaWeek");
+const { getJakartaMonthBounds } = require("../../utils/jakartaWeek");
 const crypto = require("crypto");
 const { createNotification } = require("../../utils/notificationService");
 const {
@@ -601,11 +601,11 @@ router.get(
 
     const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-    const weekBounds = getJakartaWeekBounds(new Date());
-    params.push(weekBounds.startDate);
-    const weekStartPlaceholder = `$${params.length}`;
-    params.push(weekBounds.endDate);
-    const weekEndPlaceholder = `$${params.length}`;
+    const monthBounds = getJakartaMonthBounds(new Date());
+    params.push(monthBounds.startDate);
+    const monthStartPlaceholder = `$${params.length}`;
+    params.push(monthBounds.endDate);
+    const monthEndPlaceholder = `$${params.length}`;
 
     params.push(rowLimit);
     const limitPlaceholder = `$${params.length}`;
@@ -649,7 +649,7 @@ router.get(
         WHERE lr.student_id = s.id
           AND lr.jenis_pengajuan = 'wfh'
           AND lr.status = 'Disetujui'
-          AND lr.periode_start BETWEEN ${weekStartPlaceholder}::date AND ${weekEndPlaceholder}::date
+          AND lr.periode_start BETWEEN ${monthStartPlaceholder}::date AND ${monthEndPlaceholder}::date
       ) wfh ON TRUE
       LEFT JOIN LATERAL (
         SELECT
@@ -699,7 +699,7 @@ router.get(
     await ensureStudentColumns();
 
     const studentId = requireSafeId(req.params.id);
-    const weekBounds = getJakartaWeekBounds(new Date());
+    const monthBounds = getJakartaMonthBounds(new Date());
 
     const result = await query(
       `
@@ -766,7 +766,7 @@ router.get(
       ) mem ON TRUE
       WHERE s.id = $1
       `,
-      [studentId, weekBounds.startDate, weekBounds.endDate]
+      [studentId, monthBounds.startDate, monthBounds.endDate]
     );
 
     if (result.rowCount === 0) {

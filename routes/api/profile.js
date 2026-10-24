@@ -3,7 +3,7 @@ const asyncHandler = require("../../utils/asyncHandler");
 const { query } = require("../../db/pool");
 const bcrypt = require("bcrypt");
 const { requireSafeId } = require("../../utils/securityValidation");
-const { getJakartaWeekBounds } = require("../../utils/jakartaWeek");
+const { getJakartaMonthBounds } = require("../../utils/jakartaWeek");
 const fs = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
@@ -425,7 +425,7 @@ router.get(
     await ensureProfileColumns();
 
     const userId = requireSafeId(req.params.userId, "userId");
-    const weekBounds = getJakartaWeekBounds(new Date());
+    const monthBounds = getJakartaMonthBounds(new Date());
 
     const result = await query(
       `
@@ -476,7 +476,7 @@ router.get(
         s.bio,
         s.wfh_quota
       `,
-        [userId, weekBounds.startDate, weekBounds.endDate]
+        [userId, monthBounds.startDate, monthBounds.endDate]
     );
 
     if (result.rowCount === 0) {

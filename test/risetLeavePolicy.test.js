@@ -6,6 +6,7 @@ const {
   selectPicketSchedulesOnLeaveDates,
   expandIsoDateRange
 } = require("../utils/studentLeavePicketPolicy");
+const { getJakartaMonthBounds } = require("../utils/jakartaWeek");
 
 test("Mahasiswa Riset leave policy: WFH and cuti are disallowed for Riset students", () => {
   function validateLeaveRequestForStudentType({ studentType, jenisPengajuan, requestedDays, wfhQuota, wfhUsed = 0 }) {
@@ -67,4 +68,18 @@ test("Rejected or cleared WFH resets picket schedule automatically", () => {
   assert.equal(resolveStudentLeavePicketAction({ leaveType: "wfh", status: "Ditolak" }), "clear");
   assert.equal(resolveStudentLeavePicketAction({ leaveType: "wfh", status: "Menunggu" }), "clear");
   assert.equal(resolveStudentLeavePicketAction({ leaveType: "wfh", status: "Disetujui" }), "complete");
+});
+
+test("getJakartaMonthBounds correctly returns month start and end dates in Jakarta time", () => {
+  const octBounds = getJakartaMonthBounds(new Date("2026-10-15T00:00:00Z"));
+  assert.equal(octBounds.startDate, "2026-10-01");
+  assert.equal(octBounds.endDate, "2026-10-31");
+
+  const febLeapBounds = getJakartaMonthBounds(new Date("2024-02-10T12:00:00Z"));
+  assert.equal(febLeapBounds.startDate, "2024-02-01");
+  assert.equal(febLeapBounds.endDate, "2024-02-29");
+
+  const febNonLeapBounds = getJakartaMonthBounds(new Date("2025-02-10T12:00:00Z"));
+  assert.equal(febNonLeapBounds.startDate, "2025-02-01");
+  assert.equal(febNonLeapBounds.endDate, "2025-02-28");
 });

@@ -6,7 +6,8 @@ function formatIsoDate(date) {
 }
 
 function shiftToJakarta(date = new Date()) {
-  return new Date(date.getTime() + 7 * 60 * 60 * 1000);
+  const d = date instanceof Date ? date : new Date(date);
+  return new Date(d.getTime() + 7 * 60 * 60 * 1000);
 }
 
 function getJakartaDateIso(date = new Date()) {
@@ -31,6 +32,19 @@ function getJakartaWeekBounds(date = new Date()) {
   };
 }
 
+function getJakartaMonthBounds(date = new Date()) {
+  const jakartaDate = shiftToJakarta(date);
+  const year = jakartaDate.getUTCFullYear();
+  const month = jakartaDate.getUTCMonth();
+  const startOfMonth = new Date(Date.UTC(year, month, 1));
+  const endOfMonth = new Date(Date.UTC(year, month + 1, 0));
+
+  return {
+    startDate: formatIsoDate(startOfMonth),
+    endDate: formatIsoDate(endOfMonth)
+  };
+}
+
 function getPreviousJakartaWeekBounds(date = new Date()) {
   const previousWeekAnchor = new Date(date.getTime() - 7 * 24 * 60 * 60 * 1000);
   return getJakartaWeekBounds(previousWeekAnchor);
@@ -39,6 +53,7 @@ function getPreviousJakartaWeekBounds(date = new Date()) {
 module.exports = {
   getJakartaDateIso,
   getJakartaWeekBounds,
+  getJakartaMonthBounds,
   getPreviousJakartaWeekBounds,
   shiftToJakarta
 };

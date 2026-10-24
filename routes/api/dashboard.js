@@ -17,7 +17,7 @@ const {
   deactivateAttendanceAbsentLocksForDate
 } = require("../../utils/studentAccessLocks");
 const { requireSafeId } = require("../../utils/securityValidation");
-const { getJakartaWeekBounds } = require("../../utils/jakartaWeek");
+const { getJakartaMonthBounds } = require("../../utils/jakartaWeek");
 const { findNonWorkingDayForDate } = require("../../utils/holidays");
 const { listEffectivePicketHolidays } = require("../../utils/effectivePicketHolidays");
 const { ensureStudentDocumentsTable, fetchStudentDocuments } = require("../../utils/studentDocuments");
@@ -756,15 +756,15 @@ router.get(
     const sisaCuti = Math.max(0, totalCuti - approvedLeaveCount);
 
     const wfhQuota = Number(studentRow.wfh_quota || 0);
-    const weekBounds = getJakartaWeekBounds(new Date());
+    const monthBounds = getJakartaMonthBounds(new Date());
 
     const wfhUsed = leaveRows.rows.filter(
       (item) =>
         item.status === "Disetujui" &&
         item.jenis_pengajuan === "wfh" &&
         item.counts_against_wfh_quota !== false &&
-        new Date(item.periode_start) >= new Date(weekBounds.startDate) &&
-        new Date(item.periode_start) <= new Date(weekBounds.endDate)
+        new Date(item.periode_start) >= new Date(monthBounds.startDate) &&
+        new Date(item.periode_start) <= new Date(monthBounds.endDate)
     ).length;
 
     const wfhRemaining = Math.max(0, wfhQuota - wfhUsed);

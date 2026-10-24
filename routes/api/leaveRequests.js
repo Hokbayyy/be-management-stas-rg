@@ -10,7 +10,7 @@ const fs = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
 const { requireSafeId } = require("../../utils/securityValidation");
-const { getJakartaWeekBounds } = require("../../utils/jakartaWeek");
+const { getJakartaMonthBounds } = require("../../utils/jakartaWeek");
 const { syncStudentLeaveToPicket } = require("../../utils/picketService");
 
 const router = express.Router();
@@ -212,7 +212,7 @@ function mapLeaveRequestRow(row) {
 }
 
 async function countApprovedWfhRequests(studentId, referenceDate = null, excludeRequestId = null) {
-  const weekBounds = getJakartaWeekBounds(referenceDate ? new Date(referenceDate) : new Date());
+  const monthBounds = getJakartaMonthBounds(referenceDate ? new Date(referenceDate) : new Date());
   const result = await query(
     `
     SELECT COUNT(*)::int AS used
@@ -224,7 +224,7 @@ async function countApprovedWfhRequests(studentId, referenceDate = null, exclude
       AND periode_start BETWEEN $2::date AND $3::date
       AND ($4::text IS NULL OR id <> $4)
     `,
-    [studentId, weekBounds.startDate, weekBounds.endDate, excludeRequestId || null]
+    [studentId, monthBounds.startDate, monthBounds.endDate, excludeRequestId || null]
   );
 
   return Number(result.rows[0]?.used || 0);
