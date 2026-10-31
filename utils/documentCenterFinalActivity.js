@@ -905,10 +905,10 @@ async function listEligible(rawQuery) {
     FROM filtered f
     LEFT JOIN dc_final_activity_cases c
       ON c.legacy_student_id = f.student_id
-     AND c.period_key = f.period_key
+     AND (c.period_key = f.period_key OR (c.legacy_period_id IS NOT NULL AND c.legacy_period_id = f.period_id) OR c.activity_type = f.period_activity_type)
      AND c.completion_document_definition_id = $${params.length + 1}
      AND c.outcome = 'completed'
-     AND c.case_status IN ('issued', 'revoked')
+     AND c.case_status IN ('pending', 'draft_created', 'issued', 'revoked')
     LEFT JOIN LATERAL (
       SELECT jsonb_agg(jsonb_build_object(
         'id', rm.project_id,
