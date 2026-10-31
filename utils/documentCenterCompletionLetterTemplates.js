@@ -622,11 +622,21 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
     }
 
     const generationKey = `SKS:${caseRow.activity_type}:${caseRow.student_key}:${caseId}:completed`;
+    // Clean up any existing draft or release generation_key from previous runs
     await client.query(
-      `UPDATE dc_official_documents
-       SET generation_key = NULL
-       WHERE generation_key = $1
-         AND status IN ('dicabut', 'draft')`,
+      `DELETE FROM dc_official_document_students WHERE document_id IN (SELECT id FROM dc_official_documents WHERE generation_key = $1 AND status = 'draft')`,
+      [generationKey]
+    );
+    await client.query(
+      `DELETE FROM dc_document_versions WHERE document_id IN (SELECT id FROM dc_official_documents WHERE generation_key = $1 AND status = 'draft')`,
+      [generationKey]
+    );
+    await client.query(
+      `DELETE FROM dc_official_documents WHERE generation_key = $1 AND status = 'draft'`,
+      [generationKey]
+    );
+    await client.query(
+      `UPDATE dc_official_documents SET generation_key = NULL WHERE generation_key = $1`,
       [generationKey]
     );
 
