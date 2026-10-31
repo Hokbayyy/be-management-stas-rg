@@ -1520,9 +1520,7 @@ async function listCases(rawQuery) {
   const limit = parseLimit(rawQuery.limit);
   const offset = parseOffset(rawQuery.offset);
   const params = [];
-  // This endpoint feeds the final register. Incomplete generation states are
-  // internal retry state and must not appear as registered documents.
-  const predicates = status ? [] : ["c.case_status IN ('issued', 'revoked')"];
+  const predicates = [];
   if (status) { params.push(status); predicates.push(`c.case_status = $${params.length}`); }
   if (activityType) { params.push(activityType); predicates.push(`c.activity_type = $${params.length}`); }
   if (documentPurpose === "completion_letter") predicates.push("TRUE");
@@ -2650,6 +2648,16 @@ async function resetCertificateProject({ id, authUser, ip }) {
        WHERE id = $1`,
       [caseProjectId]
     );
+
+    if (row.case_status === "revoked") {
+      await client.query(
+        `UPDATE dc_final_activity_cases
+         SET case_status = 'pending',
+             updated_at = NOW()
+         WHERE id = $1`,
+        [row.final_activity_case_id]
+      );
+    }
 
     await insertAudit(client, {
       authUser: { id: operatorUserId, role: authUser?.role },
