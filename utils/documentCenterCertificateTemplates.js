@@ -764,6 +764,41 @@ async function generateCertificateDraft({ id, authUser, ip }) {
     );
     if (!projectResult.rowCount) throw httpError(404, "Project case tidak ditemukan.");
     const row = projectResult.rows[0];
+
+    if (row.certificate_document_id) {
+      const existingDoc = await client.query(
+        "SELECT id, status FROM dc_official_documents WHERE id = $1 FOR UPDATE",
+        [row.certificate_document_id]
+      );
+      if (existingDoc.rowCount && existingDoc.rows[0].status === "draft") {
+        await client.query("DELETE FROM dc_official_document_students WHERE document_id = $1", [row.certificate_document_id]);
+        await client.query("DELETE FROM dc_document_versions WHERE document_id = $1", [row.certificate_document_id]);
+        await client.query("DELETE FROM dc_official_documents WHERE id = $1", [row.certificate_document_id]);
+        await client.query("UPDATE dc_final_activity_case_projects SET certificate_document_id = NULL, certificate_status = 'pending' WHERE id = $1", [caseProjectId]);
+        row.certificate_document_id = null;
+        row.certificate_status = "pending";
+      } else if (!existingDoc.rowCount || existingDoc.rows[0].status === "dicabut") {
+        await client.query("UPDATE dc_official_documents SET generation_key = NULL WHERE id = $1", [row.certificate_document_id]);
+        await client.query("UPDATE dc_final_activity_case_projects SET certificate_document_id = NULL, certificate_status = 'pending' WHERE id = $1", [caseProjectId]);
+        row.certificate_document_id = null;
+        row.certificate_status = "pending";
+      }
+    }
+
+    if (row.case_status === "revoked") {
+      await client.query("UPDATE dc_final_activity_cases SET case_status = 'pending' WHERE id = $1", [row.final_activity_case_id]);
+      row.case_status = "pending";
+    }
+
+    const certGenKey = `CERT:${row.activity_type}:${row.student_key}:${row.project_key}:${row.final_activity_case_id}:${row.outcome}`;
+    await client.query(
+      `UPDATE dc_official_documents
+       SET generation_key = NULL
+       WHERE generation_key = $1
+         AND status IN ('dicabut', 'draft')`,
+      [certGenKey]
+    );
+
     if (row.outcome !== "completed" || !["Magang", "Riset"].includes(row.activity_type) || row.certificate_required !== true || row.certificate_status !== "pending" || row.certificate_document_id || row.case_status === "revoked") {
       throw httpError(409, "Sertifikat tidak dapat dibuatkan draft generator.");
     }

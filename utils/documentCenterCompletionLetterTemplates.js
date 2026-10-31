@@ -462,7 +462,7 @@ async function renderCompletionLetterPdf({ backgroundBytes, data, documentNumber
   if (pdf.getPageCount() !== 1) throw httpError(409, "Template dokumen tidak tersedia.");
   const page = pdf.getPage(0);
   const { width, height } = page.getSize();
-  if (Math.abs(width - PAGE_WIDTH) > 0.2 || Math.abs(height - PAGE_HEIGHT) > 0.2) throw httpError(409, "Template dokumen tidak tersedia.");
+  if (Math.abs(width - PAGE_WIDTH) > 5.0 || Math.abs(height - PAGE_HEIGHT) > 5.0) throw httpError(409, "Template dokumen tidak tersedia.");
   const regular = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
 
@@ -595,6 +595,41 @@ async function generateCompletionLetterDraft({ id, body, authUser, ip }) {
     const caseResult = await client.query("SELECT * FROM dc_final_activity_cases WHERE id=$1 FOR UPDATE", [caseId]);
     if (!caseResult.rowCount) throw httpError(404, "Case tidak ditemukan.");
     const caseRow = caseResult.rows[0];
+
+    if (caseRow.completion_document_id) {
+      const existingDoc = await client.query(
+        "SELECT id, status FROM dc_official_documents WHERE id = $1 FOR UPDATE",
+        [caseRow.completion_document_id]
+      );
+      if (existingDoc.rowCount && existingDoc.rows[0].status === "draft") {
+        await client.query("DELETE FROM dc_official_document_students WHERE document_id = $1", [caseRow.completion_document_id]);
+        await client.query("DELETE FROM dc_document_versions WHERE document_id = $1", [caseRow.completion_document_id]);
+        await client.query("DELETE FROM dc_official_documents WHERE id = $1", [caseRow.completion_document_id]);
+        await client.query("UPDATE dc_final_activity_cases SET completion_document_id = NULL, case_status = 'pending' WHERE id = $1", [caseId]);
+        caseRow.completion_document_id = null;
+        caseRow.case_status = "pending";
+      } else if (!existingDoc.rowCount || existingDoc.rows[0].status === "dicabut") {
+        await client.query("UPDATE dc_official_documents SET generation_key = NULL WHERE id = $1", [caseRow.completion_document_id]);
+        await client.query("UPDATE dc_final_activity_cases SET completion_document_id = NULL, case_status = 'pending' WHERE id = $1", [caseId]);
+        caseRow.completion_document_id = null;
+        caseRow.case_status = "pending";
+      }
+    }
+
+    if (caseRow.case_status === "revoked") {
+      await client.query("UPDATE dc_final_activity_cases SET case_status = 'pending' WHERE id = $1", [caseId]);
+      caseRow.case_status = "pending";
+    }
+
+    const generationKey = `SKS:${caseRow.activity_type}:${caseRow.student_key}:${caseId}:completed`;
+    await client.query(
+      `UPDATE dc_official_documents
+       SET generation_key = NULL
+       WHERE generation_key = $1
+         AND status IN ('dicabut', 'draft')`,
+      [generationKey]
+    );
+
     if (
       caseRow.activity_type !== "Magang" ||
       caseRow.outcome !== "completed" ||
