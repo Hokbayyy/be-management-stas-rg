@@ -202,19 +202,25 @@ app.use(async function (req, res, next) {
       };
       req.authSessionId = decoded.jti;
 
-      // Sliding session: perpanjang cookie jika sudah lewat setengah TTL
-      extendJwtSessionIfNeeded({
-        id: decoded.jti,
-        userId: decoded.id,
-        token: token
-      }).then((extended) => {
-        if (extended) {
-          res.cookie("accessToken", token, {
+      // Sliding session: perpanjang cookie & token jika sudah lewat setengah TTL
+      try {
+        var sessionExtension = await extendJwtSessionIfNeeded({
+          id: decoded.jti,
+          userId: decoded.id,
+          token: token,
+          decodedUser: decoded
+        });
+
+        if (sessionExtension && sessionExtension.extended && sessionExtension.token) {
+          res.cookie("accessToken", sessionExtension.token, {
             ...getAuthCookieOptions(),
             maxAge: JWT_SESSION_TTL_MS
           });
+          req.cookies.accessToken = sessionExtension.token;
         }
-      }).catch(() => { });
+      } catch (extendErr) {
+        // Abaikan error perpanjangan agar request user tetap berjalan normal
+      }
 
       return next();
     } catch (error) {
@@ -256,6 +262,15 @@ app.use(async function (req, res, next) {
         name: decodedHeader.name
       };
       req.authSessionId = decodedHeader.jti;
+
+      try {
+        await extendJwtSessionIfNeeded({
+          id: decodedHeader.jti,
+          userId: decodedHeader.id,
+          token: headerToken,
+          decodedUser: decodedHeader
+        });
+      } catch (extendErr) {}
 
       return next();
     } catch (error) {

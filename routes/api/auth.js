@@ -10,7 +10,9 @@ const {
   createJwtSession,
   generateSessionId,
   getJwtSessionExpiresAt,
-  revokeJwtSession
+  revokeJwtSession,
+  JWT_SESSION_TTL_MS,
+  JWT_SESSION_EXPIRES_IN
 } = require("../../utils/jwtSessionStore");
 
 const router = express.Router();
@@ -167,7 +169,7 @@ router.post(
         jti: sessionId
       },
       env.jwtSecret,
-      { expiresIn: "15m" }
+      { expiresIn: JWT_SESSION_EXPIRES_IN }
     );
 
     await createJwtSession({
@@ -182,7 +184,7 @@ router.post(
     // Set httpOnly cookie (secure, not accessible via JavaScript/console)
     res.cookie("accessToken", token, {
       ...getAuthCookieOptions(),
-      maxAge: 15 * 60 * 1000  // 15 menit
+      maxAge: JWT_SESSION_TTL_MS
     });
 
     return res.json({

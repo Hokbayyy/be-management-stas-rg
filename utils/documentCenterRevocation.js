@@ -229,6 +229,116 @@ async function revokeDocument({ documentId, authUser, ip, body }) {
   }
 }
 
+async function unrevokeDocument({ documentId, authUser, ip }) {
+  const safeDocumentId = requireSafeId(documentId, "documentId");
+  const operatorUserId = requireSafeId(authUser?.id, "userId");
+  let client;
+  let transactionStarted = false;
+
+  try {
+    client = await pool.connect();
+    await client.query("BEGIN");
+    transactionStarted = true;
+
+    const locked = await lockOfficialDocument(client, safeDocumentId);
+    if (locked.rowCount === 0) throw httpError(404, "Dokumen tidak ditemukan.");
+    const document = locked.rows[0];
+
+    if (document.status !== "dicabut") {
+      throw httpError(409, "Hanya dokumen yang berstatus dicabut yang dapat dipulihkan.");
+    }
+
+    const link = await lockFinalActivityLink(client, safeDocumentId);
+    if (link.kind === "completion" && link.row.case_status !== "revoked") {
+      throw httpError(409, "Status case final activity tidak sesuai untuk pemulihan.");
+    }
+    if (link.kind === "certificate" && link.row.certificate_status !== "revoked") {
+      throw httpError(409, "Status sertifikat final activity tidak sesuai untuk pemulihan.");
+    }
+
+    const updated = await client.query(
+      `
+      UPDATE dc_official_documents
+      SET status = 'terbit',
+          revoked_at = NULL,
+          revocation_effective_date = NULL,
+          revocation_reason = NULL,
+          revoked_by_snapshot = NULL,
+          updated_at = NOW()
+      WHERE id = $1
+        AND status = 'dicabut'
+      RETURNING id, status, document_number, issued_at, revoked_at,
+                revocation_effective_date, current_version_number
+      `,
+      [safeDocumentId]
+    );
+    if (!updated.rowCount) throw httpError(409, "Dokumen tidak dapat dipulihkan.");
+
+    if (link.kind === "completion") {
+      const caseUpdate = await client.query(
+        `UPDATE dc_final_activity_cases
+         SET case_status = 'issued', updated_at = NOW()
+         WHERE id = $1 AND case_status = 'revoked'
+         RETURNING id`,
+        [link.row.id]
+      );
+      if (!caseUpdate.rowCount) throw httpError(409, "Gagal memperbarui status case final activity.");
+    } else {
+      const projectUpdate = await client.query(
+        `UPDATE dc_final_activity_case_projects
+         SET certificate_status = 'issued', updated_at = NOW()
+         WHERE id = $1 AND certificate_status = 'revoked'
+         RETURNING id`,
+        [link.row.id]
+      );
+      if (!projectUpdate.rowCount) throw httpError(409, "Gagal memperbarui status sertifikat final activity.");
+    }
+
+    await insertAudit(client, {
+      authUser,
+      ip,
+      event: "document_unrevoked",
+      target: "document_center_document",
+      detail: {
+        documentId: safeDocumentId,
+        documentNumber: document.document_number,
+        finalActivityKind: link.kind,
+        restoredBy: operatorUserId
+      }
+    });
+
+    await insertAudit(client, {
+      authUser,
+      ip,
+      event: link.kind === "completion" ? "final_activity_completion_unrevoked" : "final_activity_certificate_unrevoked",
+      target: "document_center_final_activity",
+      detail: link.kind === "completion"
+        ? { caseId: link.row.id, documentId: safeDocumentId, restoredBy: operatorUserId }
+        : { caseProjectId: link.row.id, caseId: link.row.final_activity_case_id, documentId: safeDocumentId, restoredBy: operatorUserId }
+    });
+
+    await client.query("COMMIT");
+    transactionStarted = false;
+    const row = updated.rows[0];
+    return {
+      id: row.id,
+      status: row.status,
+      documentNumber: row.document_number,
+      issuedAt: row.issued_at,
+      revokedAt: row.revoked_at,
+      revocationEffectiveDate: row.revocation_effective_date,
+      currentVersionNumber: row.current_version_number,
+      canDownload: Number(row.current_version_number) > 0
+    };
+  } catch (error) {
+    if (transactionStarted) await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    if (client) client.release();
+  }
+}
+
 module.exports = {
-  revokeDocument
+  revokeDocument,
+  unrevokeDocument
 };

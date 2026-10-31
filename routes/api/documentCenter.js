@@ -21,7 +21,7 @@ const {
   listReservedDocumentCenterNumbers,
   releaseDocumentCenterNumber
 } = require("../../utils/documentCenterPublish");
-const { revokeDocument } = require("../../utils/documentCenterRevocation");
+const { revokeDocument, unrevokeDocument } = require("../../utils/documentCenterRevocation");
 const {
   getDefinitions: getStudentRequestDefinitions,
   getContext: getStudentRequestContext,
@@ -57,7 +57,9 @@ const {
   updateFinalActivityDynamicData,
   cleanupFinalActivityDraftDocuments,
   cleanupCreatedFinalActivityCases,
-  healCaseAlumniRoleByDocumentId
+  healCaseAlumniRoleByDocumentId,
+  resetCertificateProject,
+  resetCompletionCase
 } = require("../../utils/documentCenterFinalActivity");
 const {
   listTemplates,
@@ -730,6 +732,14 @@ router.post("/operator/final-activity/case-projects/:id/generate-certificate-dra
   res.status(201).json(await generateCertificateDraft({ id: req.params.id, authUser: req.authUser, ip: req.ip }));
 }));
 
+router.post("/operator/final-activity/case-projects/:id/reset-certificate", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.json(await resetCertificateProject({ id: req.params.id, authUser: req.authUser, ip: req.ip }));
+}));
+
+router.post("/operator/final-activity/cases/:id/reset-completion", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
+  res.json(await resetCompletionCase({ id: req.params.id, authUser: req.authUser, ip: req.ip }));
+}));
+
 router.get("/operator/templates", requireRoleStrict(["operator"]), asyncHandler(async (req, res) => {
   res.json(await listTemplates(req.query));
 }));
@@ -798,6 +808,19 @@ router.post(
       authUser: req.authUser,
       ip: req.ip,
       body: req.body
+    });
+    res.status(200).json(document);
+  })
+);
+
+router.post(
+  "/operator/documents/:id/unrevoke",
+  requireRoleStrict(["operator"]),
+  asyncHandler(async (req, res) => {
+    const document = await unrevokeDocument({
+      documentId: req.params.id,
+      authUser: req.authUser,
+      ip: req.ip
     });
     res.status(200).json(document);
   })

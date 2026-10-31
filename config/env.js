@@ -26,7 +26,8 @@ const env = {
   cookieSameSite: String(
     process.env.COOKIE_SAMESITE || (runtimeEnv === "production" ? "none" : "strict")
   ).trim().toLowerCase(),
-  cookieDomain: process.env.COOKIE_DOMAIN || null
+  cookieDomain: process.env.COOKIE_DOMAIN || null,
+  jwtSessionTtlHours: Number(process.env.JWT_SESSION_TTL_HOURS || 8)
 };
 
 module.exports = env;

@@ -2614,6 +2614,133 @@ async function markIssuedForPublishedDocument(client, { documentId, authUser, ip
   }
 }
 
+async function resetCertificateProject({ id, authUser, ip }) {
+  const caseProjectId = safeId(id, "id");
+  const operatorUserId = safeId(authUser?.id, "userId");
+  let client;
+  let transactionStarted = false;
+
+  try {
+    client = await pool.connect();
+    await client.query("BEGIN");
+    transactionStarted = true;
+
+    const locked = await client.query(
+      `SELECT cp.*, c.case_status, c.student_snapshot
+       FROM dc_final_activity_case_projects cp
+       JOIN dc_final_activity_cases c ON c.id = cp.final_activity_case_id
+       WHERE cp.id = $1
+       FOR UPDATE OF cp`,
+      [caseProjectId]
+    );
+    if (!locked.rowCount) throw httpError(404, "Project case tidak ditemukan.");
+    const row = locked.rows[0];
+
+    if (row.certificate_status !== "revoked") {
+      throw httpError(409, "Hanya sertifikat yang berstatus dicabut yang dapat di-reset untuk penerbitan ulang.");
+    }
+
+    const previousDocumentId = row.certificate_document_id;
+
+    await client.query(
+      `UPDATE dc_final_activity_case_projects
+       SET certificate_status = 'pending',
+           certificate_document_id = NULL,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [caseProjectId]
+    );
+
+    await insertAudit(client, {
+      authUser: { id: operatorUserId, role: authUser?.role },
+      ip,
+      event: "final_activity_certificate_reset_for_reissue",
+      target: "document_center_final_activity",
+      detail: {
+        caseProjectId,
+        caseId: row.final_activity_case_id,
+        previousDocumentId,
+        studentName: row.student_snapshot?.name
+      }
+    });
+
+    await client.query("COMMIT");
+    transactionStarted = false;
+
+    return {
+      success: true,
+      caseProjectId,
+      case: await detailCase(row.final_activity_case_id)
+    };
+  } catch (error) {
+    if (transactionStarted) await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    if (client) client.release();
+  }
+}
+
+async function resetCompletionCase({ id, authUser, ip }) {
+  const caseId = safeId(id, "id");
+  const operatorUserId = safeId(authUser?.id, "userId");
+  let client;
+  let transactionStarted = false;
+
+  try {
+    client = await pool.connect();
+    await client.query("BEGIN");
+    transactionStarted = true;
+
+    const locked = await client.query(
+      `SELECT * FROM dc_final_activity_cases WHERE id = $1 FOR UPDATE`,
+      [caseId]
+    );
+    if (!locked.rowCount) throw httpError(404, "Case final activity tidak ditemukan.");
+    const row = locked.rows[0];
+
+    if (row.case_status !== "revoked") {
+      throw httpError(409, "Hanya surat selesai yang berstatus dicabut yang dapat di-reset untuk penerbitan ulang.");
+    }
+
+    const previousDocumentId = row.completion_document_id;
+
+    await client.query(
+      `UPDATE dc_final_activity_cases
+       SET case_status = 'pending',
+           completion_document_id = NULL,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [caseId]
+    );
+
+    await insertAudit(client, {
+      authUser: { id: operatorUserId, role: authUser?.role },
+      ip,
+      event: "final_activity_completion_reset_for_reissue",
+      target: "document_center_final_activity",
+      detail: {
+        caseId,
+        previousDocumentId,
+        studentName: row.student_snapshot?.name
+      }
+    });
+
+    await client.query("COMMIT");
+    transactionStarted = false;
+
+    return {
+      success: true,
+      caseId,
+      case: await detailCase(caseId)
+    };
+  } catch (error) {
+    if (transactionStarted) await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    if (client) client.release();
+  }
+}
+
 module.exports = {
   listEligible,
   listWithdrawalEligible,
@@ -2630,5 +2757,7 @@ module.exports = {
   markIssuedForPublishedDocument,
   healCaseAlumniRoleByCaseId,
   healCaseAlumniRoleByDocumentId,
-  healStudentFinalActivityCases
+  healStudentFinalActivityCases,
+  resetCertificateProject,
+  resetCompletionCase
 };
