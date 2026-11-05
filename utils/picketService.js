@@ -687,6 +687,26 @@ async function applyWeeklyScheduleToFixedDays(weeklySchedule, assignedBy, execut
       `,
       [studentId, dayId, assignedBy]
     );
+
+    await runQuery(
+      executor,
+      `
+      DELETE FROM picket_schedules
+      WHERE student_id = $1
+        AND schedule_date >= CURRENT_DATE
+        AND EXTRACT(DOW FROM schedule_date)::smallint != $2
+        AND status = 'Ditugaskan'
+        AND NOT EXISTS (
+          SELECT 1 FROM picket_submissions psub WHERE psub.schedule_id = picket_schedules.id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM picket_leave_requests plr
+          WHERE plr.replacement_schedule_id = picket_schedules.id
+            AND plr.status = 'Disetujui'
+        )
+      `,
+      [studentId, dayId]
+    );
   }
 
   const studentsResult = await runQuery(
@@ -1927,6 +1947,19 @@ async function deletePicketSchedule(id) {
   await ensurePicketTables();
   const existing = await getPicketScheduleById(id);
   if (!existing) return null;
+  await query(
+    `
+    UPDATE picket_leave_requests
+    SET review_note = CASE
+          WHEN review_note IS NULL OR review_note = '' THEN 'Jadwal pengganti dibatalkan/dihapus'
+          WHEN review_note ILIKE '%dihapus%' OR review_note ILIKE '%dibatalkan%' THEN review_note
+          ELSE review_note || ' (Jadwal pengganti dibatalkan/dihapus)'
+        END,
+        updated_at = NOW()
+    WHERE replacement_schedule_id = $1
+    `,
+    [id]
+  );
   await query("DELETE FROM picket_schedules WHERE id = $1", [id]);
   return existing;
 }
@@ -2188,6 +2221,26 @@ async function setPicketStudentDay({ studentId, dayId, assignedBy = null } = {})
       `,
       [normalizedStudentId, normalizedDayId, assignedBy]
     );
+
+    await client.query(
+      `
+      DELETE FROM picket_schedules
+      WHERE student_id = $1
+        AND schedule_date >= CURRENT_DATE
+        AND EXTRACT(DOW FROM schedule_date)::smallint != $2
+        AND status = 'Ditugaskan'
+        AND NOT EXISTS (
+          SELECT 1 FROM picket_submissions psub WHERE psub.schedule_id = picket_schedules.id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM picket_leave_requests plr
+          WHERE plr.replacement_schedule_id = picket_schedules.id
+            AND plr.status = 'Disetujui'
+        )
+      `,
+      [normalizedStudentId, normalizedDayId]
+    );
+
     await syncWeeklyScheduleFromFixedDays(client);
     await client.query("COMMIT");
   } catch (error) {
@@ -2376,14 +2429,40 @@ async function reconcilePicketAssignmentsForDate({ date, generatedBy = null, exe
       DELETE FROM picket_schedules
       WHERE schedule_date = $1::date
         AND status = 'Ditugaskan'
-        AND student_id IN (
-          SELECT id FROM students WHERE status IN ('Alumni', 'Lulus') OR status != 'Aktif'
-        )
         AND NOT EXISTS (
           SELECT 1 FROM picket_submissions psub WHERE psub.schedule_id = picket_schedules.id
         )
+        AND (
+          student_id IN (
+            SELECT id FROM students WHERE status IN ('Alumni', 'Lulus') OR status != 'Aktif'
+          )
+          OR (
+            NOT (student_id = ANY($2::text[]))
+            AND (
+              NOT EXISTS (
+                SELECT 1 FROM picket_leave_requests plr
+                WHERE plr.replacement_schedule_id = picket_schedules.id
+                  AND plr.status = 'Disetujui'
+              )
+              OR EXISTS (
+                SELECT 1 FROM picket_leave_requests plr
+                JOIN picket_schedules orig_sch ON orig_sch.id = plr.schedule_id
+                WHERE plr.replacement_schedule_id = picket_schedules.id
+                  AND plr.status = 'Disetujui'
+                  AND (
+                    orig_sch.id LIKE 'PKT-SCH-RPL%'
+                    OR orig_sch.notes LIKE '%Jadwal pengganti%'
+                    OR EXISTS (
+                      SELECT 1 FROM picket_leave_requests parent_plr
+                      WHERE parent_plr.replacement_schedule_id = orig_sch.id
+                    )
+                  )
+              )
+            )
+          )
+        )
       `,
-      [targetDate]
+      [targetDate, weeklyStudentIds]
     );
 
     const existing = await runQuery(
@@ -3637,7 +3716,7 @@ async function reviewPicketLeaveRequest(id, payload = {}) {
       `
       SELECT plr.*, TO_CHAR(plr.date, 'YYYY-MM-DD') AS date_text,
              TO_CHAR(plr.replacement_date, 'YYYY-MM-DD') AS replacement_date_text,
-             psch.task_id, psch.status AS schedule_status
+             psch.task_id, psch.status AS schedule_status, psch.notes AS schedule_notes
       FROM picket_leave_requests plr
       JOIN picket_schedules psch ON psch.id = plr.schedule_id
       WHERE plr.id = $1
@@ -3653,7 +3732,20 @@ async function reviewPicketLeaveRequest(id, payload = {}) {
     const leave = leaveResult.rows[0];
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`picket-leave-replacement:${leave.student_id}`]);
 
-    if (status === "Disetujui" && !leave.replacement_schedule_id) {
+    const isAlreadyReplacement =
+      Boolean(leave.schedule_id && leave.schedule_id.startsWith("PKT-SCH-RPL")) ||
+      Boolean(leave.schedule_notes && leave.schedule_notes.includes("Jadwal pengganti")) ||
+      Boolean(leave.source_leave_request_id);
+
+    const replacementCheck = await client.query(
+      "SELECT 1 FROM picket_leave_requests WHERE replacement_schedule_id = $1 LIMIT 1",
+      [leave.schedule_id]
+    );
+    const isReplacementSchedule = isAlreadyReplacement || replacementCheck.rowCount > 0;
+    const requestedCreateReplacement = payload.createReplacement !== false && payload.create_replacement !== false;
+    const allowReplacement = requestedCreateReplacement && !isReplacementSchedule;
+
+    if (status === "Disetujui" && allowReplacement && !leave.replacement_schedule_id) {
       const submitted = await client.query(
         "SELECT 1 FROM picket_submissions WHERE schedule_id = $1 LIMIT 1",
         [leave.schedule_id]
@@ -3678,6 +3770,18 @@ async function reviewPicketLeaveRequest(id, payload = {}) {
         "UPDATE picket_schedules SET status = 'Izin', updated_by = $2, updated_at = NOW() WHERE id = $1",
         [leave.schedule_id, reviewedBy]
       );
+    }
+
+    if (status === "Disetujui" && !allowReplacement && leave.replacement_schedule_id) {
+      const replacementSubmission = await client.query(
+        "SELECT 1 FROM picket_submissions WHERE schedule_id = $1 LIMIT 1",
+        [leave.replacement_schedule_id]
+      );
+      if (replacementSubmission.rowCount === 0) {
+        await client.query("DELETE FROM picket_schedules WHERE id = $1", [leave.replacement_schedule_id]);
+        leave.replacement_schedule_id = null;
+        leave.replacement_date_text = null;
+      }
     }
 
     if (status !== "Disetujui" && leave.replacement_schedule_id) {
@@ -3737,12 +3841,24 @@ async function backfillApprovedPicketLeaveReplacements() {
   const today = getJakartaDateIso();
   const result = await query(
     `
-    SELECT id, reviewed_by, review_note
-    FROM picket_leave_requests
-    WHERE status = 'Disetujui'
-      AND replacement_schedule_id IS NULL
-      AND date >= $1::date
-    ORDER BY date ASC, created_at ASC
+    SELECT plr.id, plr.reviewed_by, plr.review_note
+    FROM picket_leave_requests plr
+    JOIN picket_schedules psch ON psch.id = plr.schedule_id
+    WHERE plr.status = 'Disetujui'
+      AND plr.replacement_schedule_id IS NULL
+      AND plr.date >= $1::date
+      AND psch.id NOT LIKE 'PKT-SCH-RPL%'
+      AND (psch.notes IS NULL OR psch.notes NOT LIKE '%Jadwal pengganti%')
+      AND NOT EXISTS (
+        SELECT 1 FROM picket_leave_requests parent_plr
+        WHERE parent_plr.replacement_schedule_id = psch.id
+      )
+      AND (plr.review_note IS NULL OR (
+        plr.review_note NOT ILIKE '%tanpa pengganti%'
+        AND plr.review_note NOT ILIKE '%dibatalkan%'
+        AND plr.review_note NOT ILIKE '%dihapus%'
+      ))
+    ORDER BY plr.date ASC, plr.created_at ASC
     `,
     [today]
   );
