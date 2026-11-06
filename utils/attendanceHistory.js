@@ -122,6 +122,8 @@ function normalizeLeaveStatus(type) {
       return "Sakit";
     case "wfh":
       return "WFH";
+    case "tugas_luar":
+      return "Tugas Luar";
     case "cuti":
     default:
       return "Cuti";
@@ -142,6 +144,8 @@ function getStatusColor(status) {
       return "rose";
     case "WFH":
       return "sky";
+    case "Tugas Luar":
+      return "teal";
     case "Libur":
       return "gray";
     default:

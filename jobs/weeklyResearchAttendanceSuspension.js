@@ -41,7 +41,7 @@ async function fetchResearchStudentsBelowTarget(targetHours, weekStart, weekEnd)
       FROM attendance_records ar
       WHERE ar.attendance_date BETWEEN $2::date AND $3::date
         AND ar.check_in_at IS NOT NULL
-        AND ar.status IN ('Hadir', 'WFH')
+        AND ar.status IN ('Hadir', 'WFH', 'Tugas Luar')
       GROUP BY ar.student_id
     ) week_hours ON week_hours.student_id = s.id
     WHERE s.status = 'Aktif'

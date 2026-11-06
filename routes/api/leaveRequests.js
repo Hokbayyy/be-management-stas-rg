@@ -46,6 +46,7 @@ async function ensureLeaveColumns() {
         ADD COLUMN IF NOT EXISTS jenis_pengajuan TEXT NOT NULL DEFAULT 'cuti',
         ADD COLUMN IF NOT EXISTS counts_against_leave_quota BOOLEAN NOT NULL DEFAULT TRUE,
         ADD COLUMN IF NOT EXISTS counts_against_wfh_quota BOOLEAN NOT NULL DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS kategori_kegiatan TEXT,
         ADD COLUMN IF NOT EXISTS file_url TEXT,
         ADD COLUMN IF NOT EXISTS file_name TEXT,
         ADD COLUMN IF NOT EXISTS file_size BIGINT,
@@ -56,7 +57,7 @@ async function ensureLeaveColumns() {
         ALTER TABLE leave_requests
         DROP CONSTRAINT IF EXISTS leave_requests_jenis_pengajuan_check,
         ADD CONSTRAINT leave_requests_jenis_pengajuan_check
-          CHECK (jenis_pengajuan IN ('cuti', 'izin', 'sakit', 'wfh'))
+          CHECK (jenis_pengajuan IN ('cuti', 'izin', 'sakit', 'wfh', 'tugas_luar'))
       `);
     })();
   }
@@ -66,13 +67,14 @@ async function ensureLeaveColumns() {
 
 function normalizeLeaveType(value) {
   const normalized = String(value || "cuti").trim().toLowerCase();
-  return ["cuti", "izin", "sakit", "wfh"].includes(normalized) ? normalized : null;
+  return ["cuti", "izin", "sakit", "wfh", "tugas_luar"].includes(normalized) ? normalized : null;
 }
 
 function getLeaveLabel(type) {
   if (type === "izin") return "izin";
   if (type === "sakit") return "sakit";
   if (type === "wfh") return "WFH";
+  if (type === "tugas_luar") return "Tugas Luar Kampus";
   return "cuti";
 }
 
@@ -199,6 +201,8 @@ async function removeLeaveAttachment(fileUrl) {
 function mapLeaveRequestRow(row) {
   return {
     ...row,
+    kategori_kegiatan: row.kategori_kegiatan || null,
+    kategoriKegiatan: row.kategori_kegiatan || null,
     counts_against_wfh_quota: Boolean(row.counts_against_wfh_quota),
     countsAgainstWfhQuota: Boolean(row.counts_against_wfh_quota),
     file_url: row.file_url || null,
@@ -278,6 +282,7 @@ router.get(
         lr.jenis_pengajuan AS jenis,
         lr.counts_against_leave_quota,
         lr.counts_against_wfh_quota,
+        lr.kategori_kegiatan,
         lr.alasan,
         lr.catatan,
         lr.tanggal_pengajuan,
@@ -331,6 +336,7 @@ router.get(
         lr.jenis_pengajuan AS jenis,
         lr.counts_against_leave_quota,
         lr.counts_against_wfh_quota,
+        lr.kategori_kegiatan,
         lr.alasan,
         lr.catatan,
         lr.tanggal_pengajuan,
@@ -393,6 +399,8 @@ router.post(
       periodeEnd,
       jenis,
       jenisPengajuan: jenisPengajuanInput,
+      kategoriKegiatan,
+      kategori_kegiatan,
       countsAgainstLeaveQuota,
       alasan,
       catatan,
@@ -429,7 +437,7 @@ router.post(
 
     if (!jenisPengajuan) {
       return res.status(400).json({
-        message: "jenisPengajuan harus cuti, izin, sakit, atau wfh."
+        message: "jenisPengajuan harus cuti, izin, sakit, wfh, atau tugas_luar."
       });
     }
 
@@ -450,7 +458,7 @@ router.post(
 
     if (isRisetStudent && (jenisPengajuan === "cuti" || jenisPengajuan === "wfh")) {
       return res.status(400).json({
-        message: "Mahasiswa Riset hanya dapat mengajukan izin atau sakit."
+        message: "Mahasiswa Riset hanya dapat mengajukan izin, sakit, atau tugas luar."
       });
     }
 
@@ -475,6 +483,10 @@ router.post(
         });
       }
     }
+
+    const finalKategoriKegiatan = jenisPengajuan === "tugas_luar"
+      ? (String(kategoriKegiatan || kategori_kegiatan || "").trim() || "Tugas Luar Kampus")
+      : null;
 
     const countsAgainstQuota = jenisPengajuan === "cuti" && countsAgainstLeaveQuota !== false;
     const countsAgainstWfh = jenisPengajuan === "wfh";
@@ -609,6 +621,7 @@ router.post(
           jenis_pengajuan,
           counts_against_leave_quota,
           counts_against_wfh_quota,
+          kategori_kegiatan,
           alasan,
           catatan,
           tanggal_pengajuan,
@@ -630,10 +643,11 @@ router.post(
           $10,
           $11,
           $12,
-          'Menunggu',
           $13,
+          'Menunggu',
           $14,
-          $15
+          $15,
+          $16
         )
         `,
         [
@@ -646,6 +660,7 @@ router.post(
           jenisPengajuan,
           countsAgainstQuota,
           countsAgainstWfh,
+          finalKategoriKegiatan,
           alasan,
           catatan || null,
           tanggalPengajuan,
@@ -857,19 +872,194 @@ router.patch(
   })
 );
 
+router.put(
+  "/:id",
+  asyncHandler(async (req, res) => {
+    await ensureLeaveColumns();
+
+    const role = extractRole(req);
+    const leaveRequestId = requireSafeId(req.params.id, "id");
+
+    const existingResult = await query(
+      `
+      SELECT id, student_id, status, file_url, file_name, file_size, jenis_pengajuan,
+             alasan, catatan,
+             TO_CHAR(periode_start, 'YYYY-MM-DD') AS periode_start,
+             TO_CHAR(periode_end, 'YYYY-MM-DD') AS periode_end
+      FROM leave_requests
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [leaveRequestId]
+    );
+
+    if (existingResult.rowCount === 0) {
+      return res.status(404).json({ message: "Pengajuan tidak ditemukan." });
+    }
+
+    const existing = existingResult.rows[0];
+
+    // Ownership and role check
+    if (role === "mahasiswa") {
+      const myStudentId = await resolveStudentId(req.authUser.id);
+      if (!myStudentId || String(existing.student_id) !== String(myStudentId)) {
+        return res.status(403).json({ message: "Akses ditolak." });
+      }
+    } else if (role !== "operator") {
+      return res.status(403).json({ message: "Akses ditolak." });
+    }
+
+    // Only allow editing if status is 'Menunggu'
+    if (existing.status !== "Menunggu") {
+      return res.status(400).json({
+        message: "Hanya pengajuan dengan status Menunggu yang dapat diedit."
+      });
+    }
+
+    const {
+      periodeStart,
+      periodeEnd,
+      jenis,
+      jenisPengajuan: jenisPengajuanInput,
+      kategoriKegiatan,
+      kategori_kegiatan,
+      alasan,
+      catatan
+    } = req.body;
+
+    const jenisPengajuan = normalizeLeaveType(jenisPengajuanInput || jenis || existing.jenis_pengajuan);
+    if (!jenisPengajuan) {
+      return res.status(400).json({ message: "Jenis pengajuan tidak valid." });
+    }
+
+    const finalStartDateStr = periodeStart || existing.periode_start;
+    const finalEndDateStr = jenisPengajuan === "wfh"
+      ? finalStartDateStr
+      : (periodeEnd || existing.periode_end || finalStartDateStr);
+    const startDate = parseDateOnly(finalStartDateStr);
+    const endDate = parseDateOnly(finalEndDateStr);
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({ message: "Format tanggal tidak valid." });
+    }
+
+    if (endDate < startDate) {
+      return res.status(400).json({ message: "Tanggal selesai tidak boleh sebelum tanggal mulai." });
+    }
+
+    const requestedDays = inclusiveDays(startDate, endDate);
+
+    // Validate student type rules
+    const studentResult = await query(
+      "SELECT tipe, wfh_quota FROM students WHERE id = $1 LIMIT 1",
+      [existing.student_id]
+    );
+    const studentRow = studentResult.rows[0] || {};
+    const isRisetStudent = String(studentRow.tipe || "").trim().toLowerCase() === "riset";
+
+    if (isRisetStudent && (jenisPengajuan === "cuti" || jenisPengajuan === "wfh")) {
+      return res.status(400).json({
+        message: "Mahasiswa Riset hanya dapat mengajukan izin, sakit, atau tugas luar."
+      });
+    }
+
+    if (jenisPengajuan === "wfh") {
+      if (requestedDays !== 1) {
+        return res.status(400).json({ message: "Pengajuan WFH hanya berlaku 1 hari." });
+      }
+      const wfhQuota = Number(studentRow.wfh_quota || 0);
+      if (wfhQuota <= 0) {
+        return res.status(400).json({ message: "Anda tidak punya jatah WFH." });
+      }
+      const wfhUsed = await countApprovedWfhRequests(existing.student_id, finalStartDateStr, leaveRequestId);
+      if (wfhUsed >= wfhQuota) {
+        return res.status(400).json({ message: "Jatah WFH tidak mencukupi." });
+      }
+    }
+
+    const finalKategoriKegiatan = jenisPengajuan === "tugas_luar"
+      ? (String(kategoriKegiatan || kategori_kegiatan || "").trim() || "Tugas Luar Kampus")
+      : null;
+
+    const attachmentInput = pickLeaveAttachment(req.body);
+    let uploadedAttachment = null;
+    let newFileUrl = existing.file_url;
+    let newFileName = existing.file_name;
+    let newFileSize = existing.file_size;
+
+    if (attachmentInput) {
+      try {
+        uploadedAttachment = await saveLeaveAttachment(
+          attachmentInput.dataUrl.trim(),
+          attachmentInput.name
+        );
+        newFileUrl = uploadedAttachment.fileUrl;
+        newFileName = uploadedAttachment.fileName;
+        newFileSize = uploadedAttachment.fileSize;
+      } catch (error) {
+        const statusCode = error?.statusCode || 400;
+        return res.status(statusCode).json({
+          message: error?.message || "Gagal upload lampiran pengajuan."
+        });
+      }
+    }
+
+    const finalAlasan = (alasan !== undefined ? String(alasan).trim() : null) || existing.alasan;
+
+    await query(
+      `
+      UPDATE leave_requests
+      SET
+        jenis_pengajuan = $2,
+        kategori_kegiatan = $3,
+        periode_start = $4,
+        periode_end = $5,
+        durasi = $6,
+        alasan = $7,
+        catatan = COALESCE($8, catatan),
+        file_url = $9,
+        file_name = $10,
+        file_size = $11,
+        counts_against_leave_quota = $12,
+        counts_against_wfh_quota = $13,
+        updated_at = NOW()
+      WHERE id = $1
+      `,
+      [
+        leaveRequestId,
+        jenisPengajuan,
+        finalKategoriKegiatan,
+        finalStartDateStr,
+        finalEndDateStr,
+        requestedDays,
+        finalAlasan,
+        catatan || null,
+        newFileUrl,
+        newFileName,
+        newFileSize,
+        jenisPengajuan === "cuti",
+        jenisPengajuan === "wfh"
+      ]
+    );
+
+    if (uploadedAttachment && existing.file_url && existing.file_url !== newFileUrl) {
+      try {
+        await removeLeaveAttachment(existing.file_url);
+      } catch {
+        // Ignore file cleanup failure
+      }
+    }
+
+    res.json({ message: "Pengajuan berhasil diperbarui." });
+  })
+);
+
 router.delete(
   "/:id",
   asyncHandler(async (req, res) => {
     await ensureLeaveColumns();
 
     const role = extractRole(req);
-
-    if (role !== "operator") {
-      return res.status(403).json({
-        message: "Hanya operator yang dapat menghapus pengajuan cuti."
-      });
-    }
-
     const leaveRequestId = requireSafeId(req.params.id, "id");
 
     const existingRequest = await query(
@@ -889,6 +1079,23 @@ router.delete(
     }
 
     const requestRow = existingRequest.rows[0];
+
+    if (role === "mahasiswa") {
+      const myStudentId = await resolveStudentId(req.authUser.id);
+      if (!myStudentId || String(requestRow.student_id) !== String(myStudentId)) {
+        return res.status(403).json({ message: "Akses ditolak." });
+      }
+      if (requestRow.status !== "Menunggu") {
+        return res.status(400).json({
+          message: "Hanya pengajuan dengan status Menunggu yang dapat dibatalkan."
+        });
+      }
+    } else if (role !== "operator") {
+      return res.status(403).json({
+        message: "Akses ditolak."
+      });
+    }
+
     await syncStudentLeaveToPicket({
       leaveRequestId,
       studentId: requestRow.student_id,
@@ -899,8 +1106,8 @@ router.delete(
       reviewedBy: req.authUser?.id || null
     });
 
-    const result = await query(
-      "DELETE FROM leave_requests WHERE id = $1 RETURNING id, file_url",
+    await query(
+      "DELETE FROM leave_requests WHERE id = $1",
       [leaveRequestId]
     );
 
@@ -911,7 +1118,7 @@ router.delete(
     }
 
     res.json({
-      message: "Pengajuan cuti berhasil dihapus."
+      message: role === "mahasiswa" ? "Pengajuan berhasil dibatalkan." : "Pengajuan cuti berhasil dihapus."
     });
   })
 );

@@ -170,7 +170,7 @@ async function ensureAttendanceColumns() {
         ADD COLUMN IF NOT EXISTS note TEXT
       `);
 
-      // Extend status constraint to include WFH, Izin, Sakit, Libur
+      // Extend status constraint to include WFH, Izin, Sakit, Libur, Tugas Luar
       await query(`
         ALTER TABLE attendance_records
           DROP CONSTRAINT IF EXISTS attendance_records_status_check
@@ -178,7 +178,7 @@ async function ensureAttendanceColumns() {
       await query(`
         ALTER TABLE attendance_records
           ADD CONSTRAINT attendance_records_status_check
-            CHECK (status IN ('Hadir', 'Tidak Hadir', 'Cuti', 'WFH', 'Izin', 'Sakit', 'Libur'))
+            CHECK (status IN ('Hadir', 'Tidak Hadir', 'Cuti', 'WFH', 'Izin', 'Sakit', 'Libur', 'Tugas Luar'))
       `);
     })();
   }
@@ -204,6 +204,7 @@ function getStatusColor(status) {
   if (status === "Izin") return "blue";
   if (status === "Sakit") return "rose";
   if (status === "WFH") return "sky";
+  if (status === "Tugas Luar") return "teal";
   if (status === "Libur") return "gray";
   return "red";
 }
@@ -215,7 +216,7 @@ function resolveManualStatus({ status, checkIn, checkOut }) {
 }
 
 function validateAttendanceStatus(status) {
-  return ["Hadir", "Cuti", "Izin", "Sakit", "WFH", "Tidak Hadir"].includes(status);
+  return ["Hadir", "Cuti", "Izin", "Sakit", "WFH", "Tugas Luar", "Tidak Hadir"].includes(status);
 }
 
 function compareTimes(checkIn, checkOut) {
@@ -235,6 +236,8 @@ function normalizeLeaveType(type) {
       return "sakit";
     case "wfh":
       return "wfh";
+    case "tugas_luar":
+      return "tugas_luar";
     case "cuti":
     default:
       return "cuti";
@@ -394,24 +397,41 @@ function buildGpsValidationError({
 }
 
 /**
- * Check if student has approved WFH (work-from-home) leave on today's date.
- * WFH students can skip GPS radius validation.
+ * Check if student has approved WFH or Tugas Luar leave on today's date.
+ * Remote students can skip GPS radius validation.
  */
-async function hasApprovedWfhToday(studentId, dateIso) {
+async function getApprovedRemoteAttendanceToday(studentId, dateIso) {
   const result = await query(
     `
-    SELECT 1
+    SELECT jenis_pengajuan, kategori_kegiatan
     FROM leave_requests
     WHERE student_id = $1
-      AND LOWER(BTRIM(jenis_pengajuan)) = 'wfh'
+      AND LOWER(BTRIM(jenis_pengajuan)) IN ('wfh', 'tugas_luar')
       AND LOWER(BTRIM(status)) = LOWER('Disetujui')
       AND periode_start <= $2::date
       AND periode_end >= $2::date
+    ORDER BY CASE WHEN LOWER(BTRIM(jenis_pengajuan)) = 'tugas_luar' THEN 1 ELSE 2 END
     LIMIT 1
     `,
     [studentId, dateIso]
   );
-  return result.rowCount > 0;
+  if (result.rowCount === 0) {
+    return { isRemote: false, isWfh: false, isTugasLuar: false, jenis: null, namaKegiatan: null };
+  }
+  const row = result.rows[0];
+  const jenis = String(row.jenis_pengajuan || "").toLowerCase().trim();
+  return {
+    isRemote: true,
+    isWfh: jenis === "wfh",
+    isTugasLuar: jenis === "tugas_luar",
+    jenis,
+    namaKegiatan: row.kategori_kegiatan || null
+  };
+}
+
+async function hasApprovedWfhToday(studentId, dateIso) {
+  const remote = await getApprovedRemoteAttendanceToday(studentId, dateIso);
+  return remote.isWfh;
 }
 
 async function notifyOperatorsAboutEarlyCheckout({
@@ -568,11 +588,11 @@ router.post(
 
     const distanceMeters = haversineDistanceMeters(userLatitude, userLongitude, refLat, refLng);
 
-    // Check if student has approved WFH for today; if so, bypass GPS radius validation
-    const hasWfhToday = await hasApprovedWfhToday(resolvedStudentId, todayIso);
+    // Check if student has approved remote attendance (WFH or Tugas Luar) for today; if so, bypass GPS radius validation
+    const remoteInfo = await getApprovedRemoteAttendanceToday(resolvedStudentId, todayIso);
 
-    if (!hasWfhToday) {
-      // WFH not approved: enforce GPS accuracy and radius checks
+    if (!remoteInfo.isRemote) {
+      // Remote attendance not approved: enforce GPS accuracy and radius checks
       if (accuracyMetersValue != null && Number.isFinite(maxAccuracyMeters) && accuracyMetersValue > maxAccuracyMeters) {
         return res.status(400).json(
           buildGpsValidationError({
@@ -619,7 +639,7 @@ router.post(
     }
 
     const recordId = `ATD-${Date.now()}-${require("crypto").randomUUID().slice(0, 8).toUpperCase()}`;
-    const attendanceStatus = hasWfhToday ? "WFH" : "Hadir";
+    const attendanceStatus = remoteInfo.isTugasLuar ? "Tugas Luar" : remoteInfo.isWfh ? "WFH" : "Hadir";
 
     if (todayRecord.rowCount > 0) {
       await query(
@@ -657,9 +677,15 @@ router.post(
     }
 
     res.status(201).json({
-      message: hasWfhToday ? "Check-in WFH berhasil." : "Check-in berhasil.",
+      message: remoteInfo.isTugasLuar
+        ? "Check-in Tugas Luar Kampus berhasil."
+        : remoteInfo.isWfh
+        ? "Check-in WFH berhasil."
+        : "Check-in berhasil.",
       accepted: true,
-      isWfh: hasWfhToday,
+      isWfh: remoteInfo.isWfh,
+      isTugasLuar: remoteInfo.isTugasLuar,
+      status: attendanceStatus,
       accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue),
       maxAccuracyMeters,
       distanceMeters: Math.round(distanceMeters),
@@ -800,9 +826,9 @@ router.post(
     const settings = await getSettingsAsync();
     const attendanceRules = getAttendanceRules(settings);
 
-    // Validasi radius GPS checkout (kecuali WFH)
-    const hasWfhCheckout = await hasApprovedWfhToday(resolvedStudentId, todayIso);
-    if (!hasWfhCheckout && role === "mahasiswa") {
+    // Validasi radius GPS checkout (kecuali WFH atau Tugas Luar)
+    const remoteCheckout = await getApprovedRemoteAttendanceToday(resolvedStudentId, todayIso);
+    if (!remoteCheckout.isRemote && role === "mahasiswa") {
       const gpsPolicy = buildGpsPolicy(settings);
       const refLat = gpsPolicy.targetLatitude;
       const refLng = gpsPolicy.targetLongitude;
@@ -985,7 +1011,7 @@ router.post(
     }
 
     if (!validateAttendanceStatus(finalStatus)) {
-      return res.status(400).json({ message: "status harus Hadir, Cuti, Izin, Sakit, WFH, atau Tidak Hadir." });
+      return res.status(400).json({ message: "status harus Hadir, Cuti, Izin, Sakit, WFH, Tugas Luar, atau Tidak Hadir." });
     }
 
     const duplicate = await query(
@@ -1130,7 +1156,7 @@ router.patch(
     }
 
     if (!validateAttendanceStatus(finalStatus)) {
-      return res.status(400).json({ message: "status harus Hadir, Cuti, Izin, Sakit, WFH, atau Tidak Hadir." });
+      return res.status(400).json({ message: "status harus Hadir, Cuti, Izin, Sakit, WFH, Tugas Luar, atau Tidak Hadir." });
     }
 
     const duplicate = await query(
@@ -1291,7 +1317,7 @@ router.get(
       `
       SELECT student_id, COUNT(*) AS hadir_count
       FROM attendance_records
-      WHERE status IN ('Hadir', 'WFH')
+      WHERE status IN ('Hadir', 'WFH', 'Tugas Luar')
         AND attendance_date >= date_trunc('week', (NOW() AT TIME ZONE 'Asia/Jakarta')::date)
         AND attendance_date <= (NOW() AT TIME ZONE 'Asia/Jakarta')::date
       GROUP BY student_id
@@ -1370,7 +1396,7 @@ router.get(
       const status = attendance?.status;
       if (status) {
         attendanceStatusByStudentId[studentId] = status;
-        attendanceModeByStudentId[studentId] = status === "WFH" ? "wfh" : status === "Hadir" ? "onsite" : normalizeLeaveType(status);
+        attendanceModeByStudentId[studentId] = status === "WFH" ? "wfh" : status === "Tugas Luar" ? "tugas_luar" : status === "Hadir" ? "onsite" : normalizeLeaveType(status);
       }
       const currentHours = Number(student?.current_hours || 0);
       const targetHours = Number(student?.target_hours || 0);
@@ -1386,7 +1412,7 @@ router.get(
         risetWeeklyUnderHoursIds.push(studentId);
       }
 
-      if ((status === "Hadir" || status === "WFH") && attendance?.check_in_at) {
+      if ((status === "Hadir" || status === "WFH" || status === "Tugas Luar") && attendance?.check_in_at) {
         presentIds.push(studentId);
 
         if (status === "WFH") {
@@ -1684,7 +1710,7 @@ router.get(
       )::numeric(10,2) AS total_hours
       FROM attendance_records
       WHERE student_id = $1
-        AND status IN ('Hadir', 'WFH')
+        AND status IN ('Hadir', 'WFH', 'Tugas Luar')
         AND check_in_at IS NOT NULL
         AND attendance_date >= date_trunc('week', (NOW() AT TIME ZONE 'Asia/Jakarta')::date)::date
         AND attendance_date <= (NOW() AT TIME ZONE 'Asia/Jakarta')::date

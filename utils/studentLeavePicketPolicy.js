@@ -1,4 +1,4 @@
-const SUPPORTED_LEAVE_TYPES = ["cuti", "izin", "sakit", "wfh"];
+const SUPPORTED_LEAVE_TYPES = ["cuti", "izin", "sakit", "wfh", "tugas_luar"];
 
 function normalizeStudentLeaveType(value) {
   const normalized = String(value || "").trim().toLowerCase();

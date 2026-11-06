@@ -159,7 +159,7 @@ async function processAutoCheckout({ targetDate, checkoutTime }) {
           auto_checkout_reason = $3,
           updated_at = NOW()
       WHERE ar.attendance_date = $1::date
-        AND ar.status IN ('Hadir', 'WFH')
+        AND ar.status IN ('Hadir', 'WFH', 'Tugas Luar')
         AND ar.check_in_at IS NOT NULL
         AND ar.check_in_at <= (($1::date + $2::time) AT TIME ZONE 'Asia/Jakarta')
         AND ar.check_out_at IS NULL
@@ -172,7 +172,7 @@ async function processAutoCheckout({ targetDate, checkoutTime }) {
       SELECT ar.id, ar.student_id, ar.attendance_date, ar.status, ar.check_out_at, FALSE AS just_updated
       FROM attendance_records ar
       WHERE ar.attendance_date = $1::date
-        AND ar.status IN ('Hadir', 'WFH')
+        AND ar.status IN ('Hadir', 'WFH', 'Tugas Luar')
         AND (
           ar.auto_checkout = TRUE
           OR ar.auto_checkout_reason = $3
@@ -272,7 +272,7 @@ async function recoverMissedAutoCheckout({ today, checkoutTime }) {
       SELECT attendance_date
       FROM attendance_records
       WHERE attendance_date < $1::date
-        AND status IN ('Hadir', 'WFH')
+        AND status IN ('Hadir', 'WFH', 'Tugas Luar')
         AND check_in_at IS NOT NULL
         AND check_out_at IS NULL
 
@@ -295,9 +295,9 @@ async function recoverMissedAutoCheckout({ today, checkoutTime }) {
       FROM attendance_records ar
       JOIN students s ON s.id = ar.student_id
       WHERE ar.attendance_date < $1::date
-        AND ar.status IN ('Hadir', 'WFH')
+        AND ar.status IN ('Hadir', 'WFH', 'Tugas Luar')
         AND (ar.auto_checkout = TRUE OR ar.auto_checkout_reason = 'AUTO_CHECKOUT_22_00')
-        AND (ar.status = 'WFH' OR s.tipe = 'Magang')
+        AND (ar.status = 'WFH' OR ar.status = 'Tugas Luar' OR s.tipe = 'Magang')
         AND NOT EXISTS (
           SELECT 1 FROM student_access_locks sal
           WHERE sal.student_id = ar.student_id

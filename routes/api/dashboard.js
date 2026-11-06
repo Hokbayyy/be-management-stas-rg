@@ -787,7 +787,7 @@ router.get(
       )::numeric(10,2) AS total_hours
       FROM attendance_records
       WHERE student_id = $1
-        AND status IN ('Hadir', 'WFH')
+        AND status IN ('Hadir', 'WFH', 'Tugas Luar')
         AND check_in_at IS NOT NULL
         AND attendance_date >= date_trunc('week', (NOW() AT TIME ZONE 'Asia/Jakarta')::date)::date
         AND attendance_date <= (NOW() AT TIME ZONE 'Asia/Jakarta')::date
