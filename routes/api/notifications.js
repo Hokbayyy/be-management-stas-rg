@@ -4,6 +4,7 @@ const { query } = require("../../db/pool");
 const { parseBoundedLimit, requireSafeId } = require("../../utils/securityValidation");
 const { extractRole } = require("../../utils/roleGuard");
 const { createNotification, ensureNotificationsTable, inferNotificationEventId } = require("../../utils/notificationService");
+const { syncStudentAutoReminders } = require("../../utils/studentAutoReminders");
 const {
   buildReminderIdentity,
   findExistingDashboardReminder,
@@ -75,6 +76,9 @@ router.get(
       return res.status(400).json({ message: "Input tidak valid." });
     }
 
+    if (requesterRole === "mahasiswa" && resolvedUserId === requesterUserId) {
+      await syncStudentAutoReminders({ userId: resolvedUserId, role: requesterRole });
+    }
     const params = [resolvedUserId];
     let where = "WHERE n.recipient_user_id = $1";
 
@@ -409,6 +413,27 @@ router.put(
     );
 
     res.json({ message: "Preferensi notifikasi berhasil disimpan." });
+  })
+);
+
+router.post(
+  "/sync-reminders",
+  asyncHandler(async (req, res) => {
+    await ensureNotificationsTable();
+    const requesterRole = extractRole(req);
+    const requesterUserId = resolveRequesterUserId(req);
+    if (!requesterUserId) {
+      return res.status(401).json({ message: "Autentikasi diperlukan." });
+    }
+    const syncResult = await syncStudentAutoReminders({
+      userId: requesterUserId,
+      role: requesterRole,
+      forceCheck: true
+    });
+    res.json({
+      message: "Sinkronisasi pengingat piket dan deadline tugas selesai.",
+      ...syncResult
+    });
   })
 );
 

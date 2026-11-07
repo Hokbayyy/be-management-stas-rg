@@ -106,6 +106,12 @@ async function autoMigrateDatabase(clientOrPool = pool, { log = console.log, sil
   }
 
   if (!silent) log("[AutoMigrate] Database auto-generation complete.");
+  try {
+    const { ensureResearchChatTables } = require("../utils/researchChatService");
+    await ensureResearchChatTables(clientOrPool);
+  } catch (err) {
+    // ignore
+  }
   return true;
 }
 

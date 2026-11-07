@@ -16,6 +16,14 @@ const {
   upsertSprintTaskAssignment
 } = require("../../utils/researchBoardStore");
 const { createNotification } = require("../../utils/notificationService");
+const {
+  ensureResearchChatTables,
+  getProjectMqttTopic,
+  listResearchChatHistory,
+  publishResearchChatMessage,
+  subscribeProjectMqttTopic,
+  verifyResearchChatAccess
+} = require("../../utils/researchChatService");
 const { requireSafeId } = require("../../utils/securityValidation");
 const {
   healStudentFinalActivityCases
@@ -4449,6 +4457,145 @@ router.delete(
     }
 
     res.json({ message: "Notulensi berhasil dihapus." });
+  })
+);
+
+router.get(
+  "/:id/chat",
+  asyncHandler(async (req, res) => {
+    await ensureResearchChatTables();
+    const userId = resolveRequesterUserId(req);
+    const role = extractRole(req);
+    const access = await verifyResearchChatAccess({
+      userId,
+      role,
+      projectId: req.params.id
+    });
+
+    if (!access.allowed) {
+      return res.status(access.notFound ? 404 : 403).json({
+        message: access.reason || "Akses ruang chat riset ditolak."
+      });
+    }
+
+    const history = await listResearchChatHistory({
+      projectId: req.params.id,
+      limit: req.query.limit || 120,
+      after: req.query.after || null
+    });
+
+    res.json({
+      project: {
+        id: access.project.id,
+        title: access.project.title,
+        shortTitle: access.project.short_title || access.project.title,
+        status: access.project.status
+      },
+      mqtt: {
+        protocol: "MQTT/3.1.1",
+        topic: history.topic,
+        qos: 1,
+        isolatedPerResearch: true
+      },
+      viewer: {
+        userId,
+        name: access.senderName,
+        role: access.senderRole,
+        peran: access.senderPeran
+      },
+      members: history.members,
+      messages: history.messages
+    });
+  })
+);
+
+router.post(
+  "/:id/chat",
+  asyncHandler(async (req, res) => {
+    await ensureResearchChatTables();
+    const userId = resolveRequesterUserId(req);
+    const role = extractRole(req);
+    const { message, qos = 1 } = req.body || {};
+
+    const published = await publishResearchChatMessage({
+      projectId: req.params.id,
+      senderUserId: userId,
+      senderRole: role,
+      message,
+      qos
+    });
+
+    res.status(201).json(published);
+  })
+);
+
+router.get(
+  "/:id/chat/mqtt-stream",
+  asyncHandler(async (req, res) => {
+    await ensureResearchChatTables();
+    const userId = resolveRequesterUserId(req);
+    const role = extractRole(req);
+    const access = await verifyResearchChatAccess({
+      userId,
+      role,
+      projectId: req.params.id
+    });
+
+    if (!access.allowed) {
+      return res.status(access.notFound ? 404 : 403).json({
+        message: access.reason || "Akses stream MQTT riset ditolak."
+      });
+    }
+
+    const topic = getProjectMqttTopic(req.params.id);
+
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    if (typeof res.flushHeaders === "function") {
+      res.flushHeaders();
+    }
+
+    const writeMqttFrame = (eventName, frame) => {
+      try {
+        res.write(`event: ${eventName}\ndata: ${JSON.stringify(frame)}\n\n`);
+      } catch (_err) {
+        // Ignore write error on closed socket
+      }
+    };
+
+    writeMqttFrame("mqtt_connack", {
+      packetType: "CONNACK",
+      protocol: "MQTT/3.1.1",
+      returnCode: 0,
+      topic,
+      timestamp: new Date().toISOString()
+    });
+
+    writeMqttFrame("mqtt_suback", {
+      packetType: "SUBACK",
+      topic,
+      grantedQos: 1,
+      timestamp: new Date().toISOString()
+    });
+
+    const unsubscribe = subscribeProjectMqttTopic(req.params.id, (mqttPacket) => {
+      writeMqttFrame("mqtt_publish", mqttPacket);
+    });
+
+    const pingInterval = setInterval(() => {
+      writeMqttFrame("mqtt_pingresp", {
+        packetType: "PINGRESP",
+        topic,
+        timestamp: new Date().toISOString()
+      });
+    }, 20000);
+
+    req.on("close", () => {
+      clearInterval(pingInterval);
+      unsubscribe();
+    });
   })
 );
 
