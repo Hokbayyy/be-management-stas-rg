@@ -7,6 +7,10 @@ const JWT_SESSION_TTL_HOURS = Number(env.jwtSessionTtlHours || 8);
 const JWT_SESSION_TTL_MS = JWT_SESSION_TTL_HOURS * 60 * 60 * 1000; // default 8 jam
 const JWT_SESSION_EXPIRES_IN = `${JWT_SESSION_TTL_HOURS}h`;
 
+const PWA_PERMANENT_TTL_DAYS = 365;
+const PWA_PERMANENT_TTL_MS = PWA_PERMANENT_TTL_DAYS * 24 * 60 * 60 * 1000; // 365 hari (1 tahun)
+const PWA_PERMANENT_EXPIRES_IN = `${PWA_PERMANENT_TTL_DAYS}d`;
+
 let ensureJwtSessionsTablePromise = null;
 
 function generateSessionId() {
@@ -66,7 +70,7 @@ async function ensureJwtSessionsTable() {
   await ensureJwtSessionsTablePromise;
 }
 
-async function createJwtSession({ id, userId, token, expiresAt, userAgent = null, ip = null }) {
+async function createJwtSession({ id, userId, token, expiresAt, userAgent = null, ip = null, ttlMs = JWT_SESSION_TTL_MS }) {
   if (!id || !userId || !token) {
     const error = new Error("id, userId, dan token wajib diisi.");
     error.statusCode = 400;
@@ -75,20 +79,62 @@ async function createJwtSession({ id, userId, token, expiresAt, userAgent = null
 
   await ensureJwtSessionsTable();
 
+  const effectiveTtlMs = Number(ttlMs) > 0 ? Number(ttlMs) : JWT_SESSION_TTL_MS;
+
   // Gunakan jam PostgreSQL NOW() + interval agar kebal terhadap clock skew antara Node.js dan DB
   await query(
     `
     INSERT INTO jwt_sessions (id, user_id, token_hash, user_agent, ip, expires_at)
     VALUES ($1, $2, $3, $4, $5, NOW() + ($6 || ' milliseconds')::interval)
     `,
-    [id, userId, hashToken(token), userAgent, ip, JWT_SESSION_TTL_MS.toString()]
+    [id, userId, hashToken(token), userAgent, ip, effectiveTtlMs.toString()]
   );
 
   return {
     id,
     userId,
-    expiresAt: expiresAt || getJwtSessionExpiresAt()
+    expiresAt: expiresAt || new Date(Date.now() + effectiveTtlMs)
   };
+}
+
+async function upgradeSessionToPermanent({ id, userId, decodedUser }) {
+  if (!id || !userId || !decodedUser || !env.jwtSecret) return null;
+
+  await ensureJwtSessionsTable();
+
+  const newToken = jwt.sign(
+    {
+      id: decodedUser.id,
+      role: decodedUser.role,
+      name: decodedUser.name,
+      jti: id,
+      pwa: true
+    },
+    env.jwtSecret,
+    { expiresIn: PWA_PERMANENT_EXPIRES_IN }
+  );
+  const newHash = hashToken(newToken);
+
+  const result = await query(
+    `
+    UPDATE jwt_sessions
+    SET expires_at = NOW() + ($3 || ' milliseconds')::interval,
+        last_seen_at = NOW(),
+        prev_token_hash = CASE WHEN $4 <> token_hash THEN token_hash ELSE prev_token_hash END,
+        prev_token_expires_at = NOW() + INTERVAL '365 days',
+        token_hash = $4
+    WHERE id = $1
+      AND user_id = $2
+      AND revoked_at IS NULL
+    RETURNING id
+    `,
+    [id, userId, PWA_PERMANENT_TTL_MS.toString(), newHash]
+  );
+
+  if (result.rowCount > 0) {
+    return newToken;
+  }
+  return null;
 }
 
 async function verifyJwtSession({ id, userId, token }) {
@@ -146,11 +192,11 @@ async function extendJwtSessionIfNeeded({ id, userId, token, decodedUser = null 
   const result = await query(
     `
     UPDATE jwt_sessions
-    SET expires_at = NOW() + ($4 || ' milliseconds')::interval,
+    SET expires_at = GREATEST(expires_at, NOW() + ($4 || ' milliseconds')::interval),
         last_seen_at = NOW(),
         token_hash = $5,
         prev_token_hash = CASE WHEN $5 <> token_hash THEN token_hash ELSE prev_token_hash END,
-        prev_token_expires_at = CASE WHEN $5 <> token_hash THEN NOW() + INTERVAL '5 minutes' ELSE prev_token_expires_at END
+        prev_token_expires_at = CASE WHEN $5 <> token_hash THEN NOW() + INTERVAL '30 days' ELSE prev_token_expires_at END
     WHERE id = $1
       AND user_id = $2
       AND (
@@ -201,11 +247,15 @@ module.exports = {
   JWT_SESSION_TTL_HOURS,
   JWT_SESSION_TTL_MS,
   JWT_SESSION_EXPIRES_IN,
+  PWA_PERMANENT_TTL_DAYS,
+  PWA_PERMANENT_TTL_MS,
+  PWA_PERMANENT_EXPIRES_IN,
   createJwtSession,
   ensureJwtSessionsTable,
   extendJwtSessionIfNeeded,
   generateSessionId,
   getJwtSessionExpiresAt,
   revokeJwtSession,
+  upgradeSessionToPermanent,
   verifyJwtSession
 };

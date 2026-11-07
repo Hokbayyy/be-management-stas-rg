@@ -11,8 +11,11 @@ const {
   generateSessionId,
   getJwtSessionExpiresAt,
   revokeJwtSession,
+  upgradeSessionToPermanent,
   JWT_SESSION_TTL_MS,
-  JWT_SESSION_EXPIRES_IN
+  JWT_SESSION_EXPIRES_IN,
+  PWA_PERMANENT_TTL_MS,
+  PWA_PERMANENT_EXPIRES_IN
 } = require("../../utils/jwtSessionStore");
 
 const router = express.Router();
@@ -159,17 +162,26 @@ router.post(
       return sendLoginError(res, 401, "Identifier atau password salah.");
     }
 
+    const isPermanentPwa =
+      Boolean(req.body?.permanent) ||
+      Boolean(req.body?.isInstalledApp) ||
+      req.query?.permanent === "1";
+
+    const effectiveTtlMs = isPermanentPwa ? PWA_PERMANENT_TTL_MS : JWT_SESSION_TTL_MS;
+    const effectiveExpiresIn = isPermanentPwa ? PWA_PERMANENT_EXPIRES_IN : JWT_SESSION_EXPIRES_IN;
+
     const sessionId = generateSessionId();
-    const expiresAt = getJwtSessionExpiresAt();
+    const expiresAt = new Date(Date.now() + effectiveTtlMs);
     const token = jwt.sign(
       {
         id: user.id,
         role: user.role,
         name: user.name,
-        jti: sessionId
+        jti: sessionId,
+        ...(isPermanentPwa ? { pwa: true } : {})
       },
       env.jwtSecret,
-      { expiresIn: JWT_SESSION_EXPIRES_IN }
+      { expiresIn: effectiveExpiresIn }
     );
 
     await createJwtSession({
@@ -178,13 +190,14 @@ router.post(
       token,
       expiresAt,
       userAgent: req.get("user-agent") || null,
-      ip: req.ip || null
+      ip: req.ip || null,
+      ttlMs: effectiveTtlMs
     });
 
     // Set httpOnly cookie (secure, not accessible via JavaScript/console)
     res.cookie("accessToken", token, {
       ...getAuthCookieOptions(),
-      maxAge: JWT_SESSION_TTL_MS
+      maxAge: effectiveTtlMs
     });
 
     return res.json({
@@ -198,7 +211,8 @@ router.post(
         status: user.role === "mahasiswa" ? user.student_status : undefined,
         studentStatus: user.role === "mahasiswa" ? user.student_status : undefined
       },
-      token
+      token,
+      permanent: isPermanentPwa
     });
   })
 );
@@ -230,6 +244,29 @@ router.get(
     }
 
     const user = result.rows[0];
+    let upgradedToken = null;
+
+    if (req.query?.permanent === "1" && req.authSessionId) {
+      try {
+        upgradedToken = await upgradeSessionToPermanent({
+          id: req.authSessionId,
+          userId: user.id,
+          decodedUser: {
+            id: user.id,
+            role: user.role,
+            name: user.name
+          }
+        });
+        if (upgradedToken) {
+          res.cookie("accessToken", upgradedToken, {
+            ...getAuthCookieOptions(),
+            maxAge: PWA_PERMANENT_TTL_MS
+          });
+        }
+      } catch (_err) {
+        // Ignore upgrade errors and return valid user session
+      }
+    }
 
     return res.json({
       user: {
@@ -241,7 +278,8 @@ router.get(
         tipe: user.role === "mahasiswa" ? user.student_tipe : undefined,
         status: user.role === "mahasiswa" ? user.student_status : undefined,
         studentStatus: user.role === "mahasiswa" ? user.student_status : undefined
-      }
+      },
+      ...(upgradedToken ? { token: upgradedToken, permanent: true } : {})
     });
   })
 );

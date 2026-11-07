@@ -272,7 +272,7 @@ app.use(async function (req, res, next) {
           id: decodedHeader.jti,
           userId: decodedHeader.id,
           token: headerToken,
-          decodedUser: decodedHeader
+          decodedUser: null
         });
       } catch (extendErr) {}
 
