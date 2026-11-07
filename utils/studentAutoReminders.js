@@ -1,6 +1,7 @@
 const { query } = require("../db/pool");
 const { getSettingsAsync } = require("../config/systemSettingsStore");
 const { getJakartaDateIso } = require("./attendanceHistory");
+const { findNonWorkingDayForDate } = require("./holidays");
 const { addIsoDays } = require("./picketLeaveReplacement");
 const {
   createNotification,
@@ -540,6 +541,120 @@ async function checkCheckoutRemindersForActiveStudents({ userId = null } = {}) {
   return created;
 }
 
+async function checkMagangMorningCheckinReminders({ userId = null } = {}) {
+  const created = [];
+
+  try {
+    const todayIso = getJakartaDateIso();
+    const nowHm = formatJakartaTimeHm(new Date());
+    const nowMinutesOfDay = parseHmToMinutes(nowHm);
+
+    // Batas check-in mahasiswa magang adalah pukul 10:00 WIB (600 menit).
+    // Kirim pengingat mulai pukul 08:00 WIB (480) hingga 09:59 WIB (599).
+    if (nowMinutesOfDay == null || nowMinutesOfDay < 480 || nowMinutesOfDay >= 600) {
+      return created;
+    }
+
+    const settings = await getSettingsAsync();
+    const nonWorkingDay = findNonWorkingDayForDate(settings, todayIso);
+    if (nonWorkingDay) {
+      return created;
+    }
+
+    const isUrgent10Min = nowMinutesOfDay >= 590; // 09:50 - 09:59 WIB (10 menit sebelum jam 10:00)
+    const slotKey = isUrgent10Min
+      ? "magang_checkin_before_10_urgent"
+      : "magang_checkin_before_10_morning";
+
+    const params = [todayIso];
+    let userFilterSql = "";
+    if (userId) {
+      params.push(String(userId).trim());
+      userFilterSql = `AND s.user_id = $2`;
+    }
+
+    const missingCheckinRes = await query(
+      `
+      SELECT
+        s.id AS student_id,
+        s.user_id,
+        COALESCE(u.name, s.name, 'Mahasiswa') AS student_name
+      FROM students s
+      JOIN users u ON u.id = s.user_id
+      WHERE s.status = 'Aktif'
+        AND u.is_active = TRUE
+        AND s.tipe = 'Magang'
+        ${userFilterSql}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM attendance_records ar
+          WHERE ar.student_id = s.id
+            AND ar.attendance_date = $1::date
+            AND ar.check_in_at IS NOT NULL
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM leave_requests lr
+          WHERE lr.student_id = s.id
+            AND lr.status = 'Disetujui'
+            AND COALESCE(LOWER(lr.jenis_pengajuan), 'cuti') NOT IN ('wfh', 'tugas_luar')
+            AND $1::date BETWEEN lr.periode_start AND lr.periode_end
+        )
+      `,
+      params
+    );
+
+    const minsLeftToTen = Math.max(1, 600 - nowMinutesOfDay);
+
+    for (const row of missingCheckinRes.rows) {
+      const referenceKey = `magang_checkin:${row.student_id}:${todayIso}`;
+      const alreadySent = await hasNotificationDispatch({
+        eventId: "magang_checkin_reminder",
+        recipientUserId: row.user_id,
+        referenceKey,
+        scheduleSlot: slotKey
+      });
+
+      if (alreadySent) continue;
+
+      const studentName = row.student_name || "Mahasiswa";
+      const title = isUrgent10Min
+        ? `⚠️ ${minsLeftToTen} Menit Lagi Batas Check-In Magang (10:00 WIB)!`
+        : `📍 Jangan Lupa Check-In Magang Sebelum Pukul 10:00 WIB!`;
+      const body = isUrgent10Min
+        ? `Halo ${studentName}, Anda belum melakukan Check-In hari ini! Wajib Check-In sebelum pukul 10:00 WIB (${minsLeftToTen} menit lagi) agar tidak tercatat Tidak Hadir dan akun tidak terkunci otomatis.`
+        : `Halo ${studentName}, Anda belum melakukan Check-In absensi magang hari ini. Pastikan melakukan Check-In sebelum pukul 10:00 WIB di menu Absensi.`;
+
+      const notif = await createNotification({
+        recipientUserId: row.user_id,
+        type: "absensi",
+        title,
+        body
+      });
+
+      if (notif?.sent) {
+        await recordNotificationDispatch({
+          eventId: "magang_checkin_reminder",
+          recipientUserId: row.user_id,
+          referenceKey,
+          scheduleSlot: slotKey,
+          notificationId: notif.id,
+          payload: {
+            studentId: row.student_id,
+            date: todayIso,
+            slot: slotKey
+          }
+        });
+        created.push(notif.id);
+      }
+    }
+  } catch (_err) {
+    // Non-blocking if attendance tables are not yet initialized
+  }
+
+  return created;
+}
+
 async function syncStudentAutoReminders({ userId, role, forceCheck = false }) {
   const normalizedUserId = String(userId || "").trim();
   const normalizedRole = String(role || "").trim().toLowerCase();
@@ -598,12 +713,21 @@ async function syncStudentAutoReminders({ userId, role, forceCheck = false }) {
       userId: normalizedUserId
     });
 
+    const checkinCreated = await checkMagangMorningCheckinReminders({
+      userId: normalizedUserId
+    });
+
     return {
       checked: true,
-      createdCount: picketCreated.length + deadlineCreated.length + checkoutCreated.length,
+      createdCount:
+        picketCreated.length +
+        deadlineCreated.length +
+        checkoutCreated.length +
+        checkinCreated.length,
       picketCreated,
       deadlineCreated,
-      checkoutCreated
+      checkoutCreated,
+      checkinCreated
     };
   } catch (_err) {
     return { checked: false, createdCount: 0 };
@@ -612,5 +736,6 @@ async function syncStudentAutoReminders({ userId, role, forceCheck = false }) {
 
 module.exports = {
   checkCheckoutRemindersForActiveStudents,
+  checkMagangMorningCheckinReminders,
   syncStudentAutoReminders
 };
