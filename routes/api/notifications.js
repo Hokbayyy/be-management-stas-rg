@@ -5,7 +5,7 @@ const { parseBoundedLimit, requireSafeId } = require("../../utils/securityValida
 const { extractRole } = require("../../utils/roleGuard");
 const { createNotification, ensureNotificationsTable, inferNotificationEventId } = require("../../utils/notificationService");
 const { syncStudentAutoReminders } = require("../../utils/studentAutoReminders");
-const { getOrCreateVapidKeys, saveUserPushSubscription } = require("../../utils/webPushService");
+const { getOrCreateVapidKeys, saveUserPushSubscription, sendWebPushToUser } = require("../../utils/webPushService");
 const {
   buildReminderIdentity,
   findExistingDashboardReminder,
@@ -459,6 +459,97 @@ router.post(
       userAgent: req.get("user-agent") || null
     });
     res.json(result);
+  })
+);
+
+router.post(
+  "/test-push",
+  asyncHandler(async (req, res) => {
+    await ensureNotificationsTable();
+    const requesterUserId = resolveRequesterUserId(req);
+    const requesterRole = extractRole(req);
+    if (!requesterUserId) {
+      return res.status(401).json({ message: "Autentikasi diperlukan." });
+    }
+
+    if (requesterRole === "mahasiswa") {
+      await syncStudentAutoReminders({
+        userId: requesterUserId,
+        role: requesterRole,
+        forceCheck: true
+      }).catch(() => {});
+    }
+
+    const {
+      title = "🔔 Notifikasi STAS-RG Aktif!",
+      body = "Pengingat piket, deadline tugas riset, dan chat grup riset siap tampil di layar utama HP Anda.",
+      delayMs = 0,
+      ensureUnread = true,
+      forceCreate = false
+    } = req.body || {};
+
+    let unreadRes = await query(
+      `SELECT COUNT(*)::int AS cnt FROM notifications WHERE recipient_user_id = $1 AND read_at IS NULL`,
+      [requesterUserId]
+    );
+    let unreadCount = Number(unreadRes.rows[0]?.cnt || 0);
+
+    if ((ensureUnread && unreadCount === 0) || forceCreate) {
+      const notifId = `NTF-DEVICE-${requesterUserId}`;
+      await query(
+        `
+        INSERT INTO notifications (id, recipient_user_id, sender_user_id, type, title, body, read_at, created_at)
+        VALUES ($1, $2, $2, 'pengumuman', $3, $4, NULL, NOW())
+        ON CONFLICT (id)
+        DO UPDATE SET
+          title = EXCLUDED.title,
+          body = EXCLUDED.body,
+          read_at = NULL,
+          created_at = NOW()
+        `,
+        [notifId, requesterUserId, String(title).slice(0, 160), String(body).slice(0, 500)]
+      );
+      unreadRes = await query(
+        `SELECT COUNT(*)::int AS cnt FROM notifications WHERE recipient_user_id = $1 AND read_at IS NULL`,
+        [requesterUserId]
+      );
+      unreadCount = Number(unreadRes.rows[0]?.cnt || 1);
+    }
+
+    const targetUrl =
+      requesterRole === "operator"
+        ? "/operator/dashboard"
+        : requesterRole === "dosen"
+        ? "/dosen/dashboard"
+        : "/dashboard";
+
+    const pushPayload = {
+      title: String(title).slice(0, 160),
+      body: String(body).slice(0, 500),
+      type: "pengumuman",
+      tag: `stasrg-push-${Date.now()}`,
+      url: targetUrl,
+      unreadCount: Math.max(1, unreadCount)
+    };
+
+    const immediatePush = await sendWebPushToUser(requesterUserId, pushPayload);
+
+    const boundedDelay = Math.min(10000, Math.max(0, Number(delayMs) || 0));
+    if (boundedDelay > 0) {
+      setTimeout(() => {
+        sendWebPushToUser(requesterUserId, {
+          ...pushPayload,
+          tag: `stasrg-push-delayed-${Date.now()}`
+        }).catch(() => {});
+      }, boundedDelay);
+    }
+
+    res.json({
+      ok: true,
+      unreadCount: Math.max(1, unreadCount),
+      sentCount: immediatePush.sentCount,
+      scheduledDelayMs: boundedDelay
+    });
   })
 );
 
