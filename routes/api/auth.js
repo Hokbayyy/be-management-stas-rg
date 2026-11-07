@@ -162,43 +162,62 @@ router.post(
       return sendLoginError(res, 401, "Identifier atau password salah.");
     }
 
-    const isPermanentPwa =
+    const userAgentStr = String(req.get("user-agent") || "");
+    const isPermanentMobile =
       Boolean(req.body?.permanent) ||
       Boolean(req.body?.isInstalledApp) ||
-      req.query?.permanent === "1";
+      req.query?.permanent === "1" ||
+      /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(userAgentStr);
 
-    const effectiveTtlMs = isPermanentPwa ? PWA_PERMANENT_TTL_MS : JWT_SESSION_TTL_MS;
-    const effectiveExpiresIn = isPermanentPwa ? PWA_PERMANENT_EXPIRES_IN : JWT_SESSION_EXPIRES_IN;
+    let token;
 
-    const sessionId = generateSessionId();
-    const expiresAt = new Date(Date.now() + effectiveTtlMs);
-    const token = jwt.sign(
-      {
-        id: user.id,
-        role: user.role,
-        name: user.name,
-        jti: sessionId,
-        ...(isPermanentPwa ? { pwa: true } : {})
-      },
-      env.jwtSecret,
-      { expiresIn: effectiveExpiresIn }
-    );
+    if (isPermanentMobile) {
+      // Login HP / Aplikasi Terinstall: Tanpa session expiry (Permanent Login)
+      token = jwt.sign(
+        {
+          id: user.id,
+          role: user.role,
+          name: user.name,
+          permanent: true,
+          pwa: true
+        },
+        env.jwtSecret
+      );
 
-    await createJwtSession({
-      id: sessionId,
-      userId: user.id,
-      token,
-      expiresAt,
-      userAgent: req.get("user-agent") || null,
-      ip: req.ip || null,
-      ttlMs: effectiveTtlMs
-    });
+      res.cookie("accessToken", token, {
+        ...getAuthCookieOptions(),
+        maxAge: PWA_PERMANENT_TTL_MS
+      });
+    } else {
+      // Login Web (Laptop/Desktop): Tetap menggunakan session (8 jam) di jwt_sessions
+      const sessionId = generateSessionId();
+      const expiresAt = new Date(Date.now() + JWT_SESSION_TTL_MS);
+      token = jwt.sign(
+        {
+          id: user.id,
+          role: user.role,
+          name: user.name,
+          jti: sessionId
+        },
+        env.jwtSecret,
+        { expiresIn: JWT_SESSION_EXPIRES_IN }
+      );
 
-    // Set httpOnly cookie (secure, not accessible via JavaScript/console)
-    res.cookie("accessToken", token, {
-      ...getAuthCookieOptions(),
-      maxAge: effectiveTtlMs
-    });
+      await createJwtSession({
+        id: sessionId,
+        userId: user.id,
+        token,
+        expiresAt,
+        userAgent: userAgentStr || null,
+        ip: req.ip || null,
+        ttlMs: JWT_SESSION_TTL_MS
+      });
+
+      res.cookie("accessToken", token, {
+        ...getAuthCookieOptions(),
+        maxAge: JWT_SESSION_TTL_MS
+      });
+    }
 
     return res.json({
       user: {
@@ -212,7 +231,7 @@ router.post(
         studentStatus: user.role === "mahasiswa" ? user.student_status : undefined
       },
       token,
-      permanent: isPermanentPwa
+      permanent: isPermanentMobile
     });
   })
 );
@@ -244,28 +263,27 @@ router.get(
     }
 
     const user = result.rows[0];
-    let upgradedToken = null;
+    const userAgentStr = String(req.get("user-agent") || "");
+    const isPermanentMobile =
+      req.query?.permanent === "1" ||
+      /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(userAgentStr);
 
-    if (req.query?.permanent === "1" && req.authSessionId) {
-      try {
-        upgradedToken = await upgradeSessionToPermanent({
-          id: req.authSessionId,
-          userId: user.id,
-          decodedUser: {
-            id: user.id,
-            role: user.role,
-            name: user.name
-          }
-        });
-        if (upgradedToken) {
-          res.cookie("accessToken", upgradedToken, {
-            ...getAuthCookieOptions(),
-            maxAge: PWA_PERMANENT_TTL_MS
-          });
-        }
-      } catch (_err) {
-        // Ignore upgrade errors and return valid user session
-      }
+    let permanentToken = null;
+    if (isPermanentMobile) {
+      permanentToken = jwt.sign(
+        {
+          id: user.id,
+          role: user.role,
+          name: user.name,
+          permanent: true,
+          pwa: true
+        },
+        env.jwtSecret
+      );
+      res.cookie("accessToken", permanentToken, {
+        ...getAuthCookieOptions(),
+        maxAge: PWA_PERMANENT_TTL_MS
+      });
     }
 
     return res.json({
@@ -279,7 +297,7 @@ router.get(
         status: user.role === "mahasiswa" ? user.student_status : undefined,
         studentStatus: user.role === "mahasiswa" ? user.student_status : undefined
       },
-      ...(upgradedToken ? { token: upgradedToken, permanent: true } : {})
+      ...(permanentToken ? { token: permanentToken, permanent: true } : {})
     });
   })
 );

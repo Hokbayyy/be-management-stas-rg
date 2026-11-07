@@ -159,81 +159,91 @@ app.use(async function (req, res, next) {
 
   // Try to extract JWT from httpOnly cookie first (primary method)
   var token = req.cookies && req.cookies.accessToken;
+  var hasBearerFallback = Boolean(req.headers["authorization"] && String(req.headers["authorization"]).startsWith("Bearer "));
 
   if (token) {
     try {
       var decoded = jwt.verify(token, env.jwtSecret);
-      var sessionIsActive = await verifyJwtSession({
-        id: decoded.jti,
-        userId: decoded.id,
-        token: token
-      });
+      var isPermanentCookieToken = Boolean(decoded.permanent || decoded.pwa);
+      var sessionIsActive = isPermanentCookieToken
+        ? true
+        : await verifyJwtSession({
+            id: decoded.jti,
+            userId: decoded.id,
+            token: token
+          });
 
       if (!sessionIsActive) {
         clearAuthCookieResponse(res);
-
-        return res.status(401).json({
-          message: "Sesi tidak valid atau sudah berakhir."
-        });
-      }
-
-      var activeUserResult = await query(
-        "SELECT id, is_active FROM users WHERE id = $1 LIMIT 1",
-        [decoded.id]
-      );
-
-      if (activeUserResult.rowCount === 0 || activeUserResult.rows[0].is_active === false) {
-        await revokeJwtSession({
-          id: decoded.jti,
-          userId: decoded.id,
-          token: token
-        });
-        clearAuthCookieResponse(res);
-
-        return res.status(403).json({
-          status: "error",
-          message: INACTIVE_ACCOUNT_MESSAGE
-        });
-      }
-
-      req.authUser = {
-        id: decoded.id,
-        role: decoded.role,
-        name: decoded.name
-      };
-      req.authSessionId = decoded.jti;
-
-      // Sliding session: perpanjang cookie & token jika sudah lewat setengah TTL
-      try {
-        var sessionExtension = await extendJwtSessionIfNeeded({
-          id: decoded.jti,
-          userId: decoded.id,
-          token: token,
-          decodedUser: decoded
-        });
-
-        if (sessionExtension && sessionExtension.extended && sessionExtension.token) {
-          res.cookie("accessToken", sessionExtension.token, {
-            ...getAuthCookieOptions(),
-            maxAge: JWT_SESSION_TTL_MS
+        if (!hasBearerFallback) {
+          return res.status(401).json({
+            message: "Sesi tidak valid atau sudah berakhir."
           });
-          req.cookies.accessToken = sessionExtension.token;
         }
-      } catch (extendErr) {
-        // Abaikan error perpanjangan agar request user tetap berjalan normal
-      }
+      } else {
+        var activeUserResult = await query(
+          "SELECT id, is_active FROM users WHERE id = $1 LIMIT 1",
+          [decoded.id]
+        );
 
-      return next();
+        if (activeUserResult.rowCount === 0 || activeUserResult.rows[0].is_active === false) {
+          if (!isPermanentCookieToken) {
+            await revokeJwtSession({
+              id: decoded.jti,
+              userId: decoded.id,
+              token: token
+            });
+          }
+          clearAuthCookieResponse(res);
+
+          return res.status(403).json({
+            status: "error",
+            message: INACTIVE_ACCOUNT_MESSAGE
+          });
+        }
+
+        req.authUser = {
+          id: decoded.id,
+          role: decoded.role,
+          name: decoded.name
+        };
+        req.authSessionId = decoded.jti || null;
+
+        // Sliding session khusus Web (yang memakai jwt_sessions)
+        if (!isPermanentCookieToken && decoded.jti) {
+          try {
+            var sessionExtension = await extendJwtSessionIfNeeded({
+              id: decoded.jti,
+              userId: decoded.id,
+              token: token,
+              decodedUser: decoded
+            });
+
+            if (sessionExtension && sessionExtension.extended && sessionExtension.token) {
+              res.cookie("accessToken", sessionExtension.token, {
+                ...getAuthCookieOptions(),
+                maxAge: JWT_SESSION_TTL_MS
+              });
+              req.cookies.accessToken = sessionExtension.token;
+            }
+          } catch (extendErr) {
+            // Abaikan error perpanjangan agar request user tetap berjalan normal
+          }
+        }
+
+        return next();
+      }
     } catch (error) {
       if (error && (error.name === "JsonWebTokenError" || error.name === "TokenExpiredError")) {
         clearAuthCookieResponse(res);
-
-        return res.status(401).json({
-          message: "Token tidak valid atau sudah expired."
-        });
+        if (!hasBearerFallback) {
+          return res.status(401).json({
+            message: "Token tidak valid atau sudah expired."
+          });
+        }
+      } else {
+        return next(error);
       }
-
-      return next(error);
     }
   }
 
@@ -248,15 +258,30 @@ app.use(async function (req, res, next) {
 
     try {
       var decodedHeader = jwt.verify(headerToken, env.jwtSecret);
-      var headerSessionIsActive = await verifyJwtSession({
-        id: decodedHeader.jti,
-        userId: decodedHeader.id,
-        token: headerToken
-      });
+      var isPermanentHeaderToken = Boolean(decodedHeader.permanent || decodedHeader.pwa);
+      var headerSessionIsActive = isPermanentHeaderToken
+        ? true
+        : await verifyJwtSession({
+            id: decodedHeader.jti,
+            userId: decodedHeader.id,
+            token: headerToken
+          });
 
       if (!headerSessionIsActive) {
         return res.status(401).json({
           message: "Sesi tidak valid atau sudah berakhir."
+        });
+      }
+
+      var activeHeaderUserResult = await query(
+        "SELECT id, is_active FROM users WHERE id = $1 LIMIT 1",
+        [decodedHeader.id]
+      );
+
+      if (activeHeaderUserResult.rowCount === 0 || activeHeaderUserResult.rows[0].is_active === false) {
+        return res.status(403).json({
+          status: "error",
+          message: INACTIVE_ACCOUNT_MESSAGE
         });
       }
 
@@ -265,16 +290,18 @@ app.use(async function (req, res, next) {
         role: decodedHeader.role,
         name: decodedHeader.name
       };
-      req.authSessionId = decodedHeader.jti;
+      req.authSessionId = decodedHeader.jti || null;
 
-      try {
-        await extendJwtSessionIfNeeded({
-          id: decodedHeader.jti,
-          userId: decodedHeader.id,
-          token: headerToken,
-          decodedUser: null
-        });
-      } catch (extendErr) {}
+      if (!isPermanentHeaderToken && decodedHeader.jti) {
+        try {
+          await extendJwtSessionIfNeeded({
+            id: decodedHeader.jti,
+            userId: decodedHeader.id,
+            token: headerToken,
+            decodedUser: null
+          });
+        } catch (extendErr) {}
+      }
 
       return next();
     } catch (error) {
