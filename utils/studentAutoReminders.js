@@ -1,4 +1,5 @@
 const { query } = require("../db/pool");
+const { getSettingsAsync } = require("../config/systemSettingsStore");
 const { getJakartaDateIso } = require("./attendanceHistory");
 const { addIsoDays } = require("./picketLeaveReplacement");
 const {
@@ -293,6 +294,252 @@ async function checkTaskDeadlineRemindersForStudent({ userId, studentName, today
   return created;
 }
 
+function formatJakartaTimeHm(date = new Date()) {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Jakarta",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    hourCycle: "h23"
+  });
+  const parts = formatter.formatToParts(date).reduce((acc, item) => {
+    acc[item.type] = item.value;
+    return acc;
+  }, {});
+  const hour = parts.hour === "24" ? "00" : parts.hour;
+  return `${hour}:${parts.minute}`;
+}
+
+function parseHmToMinutes(hmString) {
+  const [h, m] = String(hmString || "").trim().split(":").map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  return h * 60 + m;
+}
+
+function formatHoursClean(hoursValue) {
+  const num = Number(hoursValue || 0);
+  const fixed = num.toFixed(1);
+  return fixed.endsWith(".0") ? fixed.slice(0, -2) : fixed;
+}
+
+async function checkCheckoutRemindersForActiveStudents({ userId = null } = {}) {
+  const created = [];
+
+  try {
+    const settings = await getSettingsAsync();
+    const attendanceRules = settings?.attendanceRules || {};
+    const magangMinCheckoutHours =
+      Number(attendanceRules.magangMinCheckoutHours || 8) > 0
+        ? Number(attendanceRules.magangMinCheckoutHours || 8)
+        : 8;
+    const risetTargetWeeklyHours =
+      Number(attendanceRules.risetTargetWeeklyHours || 6) > 0
+        ? Number(attendanceRules.risetTargetWeeklyHours || 6)
+        : 6;
+    const autoCheckoutTime = /^\d{2}:\d{2}$/.test(String(attendanceRules.autoCheckoutTime || "").trim())
+      ? String(attendanceRules.autoCheckoutTime).trim()
+      : "22:00";
+
+    const params = [];
+    let userFilterSql = "";
+    if (userId) {
+      params.push(String(userId).trim());
+      userFilterSql = `AND s.user_id = $1`;
+    }
+
+    const activeRowsRes = await query(
+      `
+      SELECT
+        ar.id AS attendance_id,
+        ar.student_id,
+        ar.check_in_at,
+        EXTRACT(EPOCH FROM (NOW() - ar.check_in_at)) / 60.0 AS elapsed_minutes,
+        s.user_id,
+        s.tipe AS student_tipe,
+        COALESCE(s.jam_minggu_target, 0)::numeric AS student_weekly_target,
+        COALESCE(u.name, s.name, 'Mahasiswa') AS student_name,
+        COALESCE(
+          (
+            SELECT SUM(
+              GREATEST(
+                EXTRACT(EPOCH FROM (ar_prev.check_out_at - ar_prev.check_in_at)) / 60.0,
+                0
+              )
+            )
+            FROM attendance_records ar_prev
+            WHERE ar_prev.student_id = ar.student_id
+              AND ar_prev.id <> ar.id
+              AND ar_prev.status IN ('Hadir', 'WFH', 'Tugas Luar')
+              AND ar_prev.check_in_at IS NOT NULL
+              AND ar_prev.check_out_at IS NOT NULL
+              AND ar_prev.attendance_date >= date_trunc('week', (NOW() AT TIME ZONE 'Asia/Jakarta')::date)::date
+              AND ar_prev.attendance_date <= (NOW() AT TIME ZONE 'Asia/Jakarta')::date
+          ),
+          0
+        )::numeric AS prior_week_minutes
+      FROM attendance_records ar
+      JOIN students s ON s.id = ar.student_id
+      JOIN users u ON u.id = s.user_id
+      WHERE ar.attendance_date = (NOW() AT TIME ZONE 'Asia/Jakarta')::date
+        AND ar.status IN ('Hadir', 'WFH', 'Tugas Luar')
+        AND ar.check_in_at IS NOT NULL
+        AND ar.check_out_at IS NULL
+        AND s.status = 'Aktif'
+        AND u.is_active = TRUE
+        ${userFilterSql}
+      `,
+      params
+    );
+
+    const nowHm = formatJakartaTimeHm(new Date());
+    const nowMinutesOfDay = parseHmToMinutes(nowHm);
+    const cutoffMinutesOfDay = parseHmToMinutes(autoCheckoutTime);
+
+    for (const row of activeRowsRes.rows) {
+      const elapsedMinutes = Math.max(0, Number(row.elapsed_minutes || 0));
+      const studentType = String(row.student_tipe || "").trim();
+      const isMagang = studentType.toLowerCase() === "magang";
+      const studentName = row.student_name || "Mahasiswa";
+      const checkInDate = new Date(row.check_in_at);
+
+      let targetSessionMinutes = 0;
+      let targetLabelHours = "";
+
+      if (isMagang) {
+        targetSessionMinutes = magangMinCheckoutHours * 60;
+        targetLabelHours = formatHoursClean(magangMinCheckoutHours);
+      } else {
+        const weeklyTargetHours =
+          Number(row.student_weekly_target) > 0
+            ? Number(row.student_weekly_target)
+            : risetTargetWeeklyHours;
+        const weeklyTargetMinutes = weeklyTargetHours * 60;
+        const priorWeekMinutes = Math.max(0, Number(row.prior_week_minutes || 0));
+
+        if (priorWeekMinutes < weeklyTargetMinutes) {
+          targetSessionMinutes = weeklyTargetMinutes - priorWeekMinutes;
+        } else {
+          targetSessionMinutes = weeklyTargetMinutes;
+        }
+        targetLabelHours = formatHoursClean(weeklyTargetHours);
+      }
+
+      const remainingMinutes = targetSessionMinutes - elapsedMinutes;
+
+      // 1. Notifikasi 10 menit sebelum jam terpenuhi (untuk Mahasiswa Magang maupun Mahasiswa Riset)
+      if (targetSessionMinutes > 0 && remainingMinutes <= 10) {
+        const referenceKey = `checkout_10m:${row.attendance_id}`;
+        const slotKey = "target_10m";
+
+        const alreadySent = await hasNotificationDispatch({
+          eventId: "checkout_reminder_10m",
+          recipientUserId: row.user_id,
+          referenceKey,
+          scheduleSlot: slotKey
+        });
+
+        if (!alreadySent) {
+          const targetTimestamp = new Date(checkInDate.getTime() + targetSessionMinutes * 60 * 1000);
+          const targetTimeWib = formatJakartaTimeHm(targetTimestamp);
+          const minsLeft = Math.max(1, Math.ceil(remainingMinutes));
+
+          let title;
+          let body;
+
+          if (isMagang) {
+            if (remainingMinutes > 0) {
+              title = `⏰ ${minsLeft} Menit Lagi Jam Magang Terpenuhi — Jangan Lupa Check-Out!`;
+              body = `Halo ${studentName}, sekitar ${minsLeft} menit lagi (pukul ${targetTimeWib} WIB) durasi absensi magang Anda mencapai ${targetLabelHours} jam. Pastikan logbook hari ini sudah diisi dan jangan lupa melakukan Check-Out!`;
+            } else {
+              title = `✅ Jam Magang (${targetLabelHours} Jam) Terpenuhi — Jangan Lupa Check-Out!`;
+              body = `Halo ${studentName}, durasi absensi magang Anda hari ini telah memenuhi target ${targetLabelHours} jam. Pastikan logbook sudah diisi dan segera lakukan Check-Out!`;
+            }
+          } else {
+            if (remainingMinutes > 0) {
+              title = `⏰ ${minsLeft} Menit Lagi Jam Riset Terpenuhi — Jangan Lupa Check-Out!`;
+              body = `Halo ${studentName}, sekitar ${minsLeft} menit lagi (pukul ${targetTimeWib} WIB) target jam kehadiran riset Anda (${targetLabelHours} jam/minggu) akan terpenuhi. Pastikan logbook hari ini sudah diisi dan jangan lupa melakukan Check-Out!`;
+            } else {
+              title = `✅ Target Jam Riset (${targetLabelHours} Jam) Terpenuhi — Jangan Lupa Check-Out!`;
+              body = `Halo ${studentName}, target jam kehadiran riset Anda (${targetLabelHours} jam/minggu) sudah terpenuhi. Pastikan logbook hari ini sudah diisi dan segera lakukan Check-Out!`;
+            }
+          }
+
+          const notif = await createNotification({
+            recipientUserId: row.user_id,
+            type: "absensi",
+            title,
+            body
+          });
+
+          if (notif?.sent) {
+            await recordNotificationDispatch({
+              eventId: "checkout_reminder_10m",
+              recipientUserId: row.user_id,
+              referenceKey,
+              scheduleSlot: slotKey,
+              notificationId: notif.id,
+              payload: {
+                attendanceId: row.attendance_id,
+                studentType,
+                elapsedMinutes: Math.round(elapsedMinutes),
+                targetSessionMinutes: Math.round(targetSessionMinutes)
+              }
+            });
+            created.push(notif.id);
+          }
+        }
+      }
+
+      // 2. Pengingat tambahan 10 menit sebelum batas auto-checkout malam (21:50 WIB) jika belum checkout
+      if (
+        nowMinutesOfDay != null &&
+        cutoffMinutesOfDay != null &&
+        cutoffMinutesOfDay - nowMinutesOfDay >= 0 &&
+        cutoffMinutesOfDay - nowMinutesOfDay <= 10
+      ) {
+        const referenceKey = `checkout_cutoff:${row.attendance_id}`;
+        const slotKey = "cutoff_10m";
+
+        const alreadySentCutoff = await hasNotificationDispatch({
+          eventId: "checkout_reminder_10m",
+          recipientUserId: row.user_id,
+          referenceKey,
+          scheduleSlot: slotKey
+        });
+
+        if (!alreadySentCutoff) {
+          const minsToCutoff = Math.max(1, cutoffMinutesOfDay - nowMinutesOfDay);
+          const notif = await createNotification({
+            recipientUserId: row.user_id,
+            type: "absensi",
+            title: `⚠️ ${minsToCutoff} Menit Sebelum Batas Akhir Check-Out (${autoCheckoutTime} WIB)!`,
+            body: `Halo ${studentName}, Anda belum melakukan Check-Out hari ini. Segera isi logbook dan lakukan Check-Out sebelum absensi ditutup otomatis pada pukul ${autoCheckoutTime} WIB.`
+          });
+
+          if (notif?.sent) {
+            await recordNotificationDispatch({
+              eventId: "checkout_reminder_10m",
+              recipientUserId: row.user_id,
+              referenceKey,
+              scheduleSlot: slotKey,
+              notificationId: notif.id,
+              payload: {
+                attendanceId: row.attendance_id,
+                autoCheckoutTime
+              }
+            });
+            created.push(notif.id);
+          }
+        }
+      }
+    }
+  } catch (_err) {
+    // Non-blocking if attendance tables are not yet initialized
+  }
+
+  return created;
+}
+
 async function syncStudentAutoReminders({ userId, role, forceCheck = false }) {
   const normalizedUserId = String(userId || "").trim();
   const normalizedRole = String(role || "").trim().toLowerCase();
@@ -347,11 +594,16 @@ async function syncStudentAutoReminders({ userId, role, forceCheck = false }) {
       todayIso
     });
 
+    const checkoutCreated = await checkCheckoutRemindersForActiveStudents({
+      userId: normalizedUserId
+    });
+
     return {
       checked: true,
-      createdCount: picketCreated.length + deadlineCreated.length,
+      createdCount: picketCreated.length + deadlineCreated.length + checkoutCreated.length,
       picketCreated,
-      deadlineCreated
+      deadlineCreated,
+      checkoutCreated
     };
   } catch (_err) {
     return { checked: false, createdCount: 0 };
@@ -359,5 +611,6 @@ async function syncStudentAutoReminders({ userId, role, forceCheck = false }) {
 }
 
 module.exports = {
+  checkCheckoutRemindersForActiveStudents,
   syncStudentAutoReminders
 };

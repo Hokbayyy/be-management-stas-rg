@@ -10,6 +10,7 @@ const {
   createWfhCheckinMissingLocks
 } = require("../utils/studentAccessLocks");
 const { findNonWorkingDayForDate } = require("../utils/holidays");
+const { checkCheckoutRemindersForActiveStudents } = require("../utils/studentAutoReminders");
 
 const TIMEZONE = "Asia/Jakarta";
 const ONE_MINUTE = 60 * 1000;
@@ -327,6 +328,7 @@ async function runAutoCheckoutCycle(now = new Date()) {
   const enabled = attendanceRules.autoCheckoutEnabled !== false;
   const checkoutTime = normalizeTimeValue(attendanceRules.autoCheckoutTime, "22:00");
   const nowParts = getJakartaNowParts(now);
+  const checkoutReminders = await checkCheckoutRemindersForActiveStudents().catch(() => []);
 
   if (!enabled) {
     return { ran: false, reason: "disabled", now: nowParts };
@@ -348,7 +350,8 @@ async function runAutoCheckoutCycle(now = new Date()) {
   const processed = recovery.reduce((sum, item) => sum + item.processed, 0) + (currentDay?.processed || 0);
 
   return {
-    ran: processed > 0,
+    ran: processed > 0 || checkoutReminders.length > 0,
+    checkoutRemindersCount: checkoutReminders.length,
     now: nowParts,
     checkoutTime,
     processed,

@@ -177,7 +177,14 @@ async function createNotification({
       title,
       body,
       tag: `stasrg-notif-${notificationId}`,
-      url: type === "piket" ? "/picket" : (type === "riset" || type === "deadline" ? "/research" : "/dashboard")
+      url:
+        type === "piket"
+          ? "/picket"
+          : type === "absensi"
+          ? "/attendance"
+          : type === "riset" || type === "deadline"
+          ? "/research"
+          : "/dashboard"
     }).catch(() => {});
   });
 
