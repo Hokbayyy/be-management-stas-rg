@@ -80,14 +80,15 @@ async function createJwtSession({ id, userId, token, expiresAt, userAgent = null
   await ensureJwtSessionsTable();
 
   const effectiveTtlMs = Number(ttlMs) > 0 ? Number(ttlMs) : JWT_SESSION_TTL_MS;
+  const effectiveTtlSeconds = Math.max(1, Math.floor(effectiveTtlMs / 1000));
 
-  // Gunakan jam PostgreSQL NOW() + interval agar kebal terhadap clock skew antara Node.js dan DB
+  // Gunakan jam PostgreSQL NOW() + interval seconds (hindari integer overflow 32-bit pada milliseconds > 24 hari)
   await query(
     `
     INSERT INTO jwt_sessions (id, user_id, token_hash, user_agent, ip, expires_at)
-    VALUES ($1, $2, $3, $4, $5, NOW() + ($6 || ' milliseconds')::interval)
+    VALUES ($1, $2, $3, $4, $5, NOW() + ($6 || ' seconds')::interval)
     `,
-    [id, userId, hashToken(token), userAgent, ip, effectiveTtlMs.toString()]
+    [id, userId, hashToken(token), userAgent, ip, effectiveTtlSeconds.toString()]
   );
 
   return {
@@ -118,17 +119,17 @@ async function upgradeSessionToPermanent({ id, userId, decodedUser }) {
   const result = await query(
     `
     UPDATE jwt_sessions
-    SET expires_at = NOW() + ($3 || ' milliseconds')::interval,
+    SET expires_at = NOW() + INTERVAL '365 days',
         last_seen_at = NOW(),
-        prev_token_hash = CASE WHEN $4 <> token_hash THEN token_hash ELSE prev_token_hash END,
+        prev_token_hash = CASE WHEN $3 <> token_hash THEN token_hash ELSE prev_token_hash END,
         prev_token_expires_at = NOW() + INTERVAL '365 days',
-        token_hash = $4
+        token_hash = $3
     WHERE id = $1
       AND user_id = $2
       AND revoked_at IS NULL
     RETURNING id
     `,
-    [id, userId, PWA_PERMANENT_TTL_MS.toString(), newHash]
+    [id, userId, newHash]
   );
 
   if (result.rowCount > 0) {
@@ -169,7 +170,8 @@ async function extendJwtSessionIfNeeded({ id, userId, token, decodedUser = null 
 
   await ensureJwtSessionsTable();
 
-  const halfTtl = JWT_SESSION_TTL_MS / 2;
+  const ttlSeconds = Math.max(1, Math.floor(JWT_SESSION_TTL_MS / 1000));
+  const halfTtlSeconds = Math.max(1, Math.floor(ttlSeconds / 2));
   const currentHash = hashToken(token);
 
   let newToken = null;
@@ -192,7 +194,7 @@ async function extendJwtSessionIfNeeded({ id, userId, token, decodedUser = null 
   const result = await query(
     `
     UPDATE jwt_sessions
-    SET expires_at = GREATEST(expires_at, NOW() + ($4 || ' milliseconds')::interval),
+    SET expires_at = GREATEST(expires_at, NOW() + ($4 || ' seconds')::interval),
         last_seen_at = NOW(),
         token_hash = $5,
         prev_token_hash = CASE WHEN $5 <> token_hash THEN token_hash ELSE prev_token_hash END,
@@ -205,10 +207,10 @@ async function extendJwtSessionIfNeeded({ id, userId, token, decodedUser = null 
       )
       AND revoked_at IS NULL
       AND expires_at > NOW()
-      AND expires_at < NOW() + ($6 || ' milliseconds')::interval
+      AND expires_at < NOW() + ($6 || ' seconds')::interval
     RETURNING id
     `,
-    [id, userId, currentHash, JWT_SESSION_TTL_MS.toString(), newHash, halfTtl.toString()]
+    [id, userId, currentHash, ttlSeconds.toString(), newHash, halfTtlSeconds.toString()]
   );
 
   if (result.rowCount > 0) {
