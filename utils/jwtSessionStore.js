@@ -3,8 +3,8 @@ const jwt = require("jsonwebtoken");
 const env = require("../config/env");
 const { query } = require("../db/pool");
 
-const JWT_SESSION_TTL_HOURS = Number(env.jwtSessionTtlHours || 8);
-const JWT_SESSION_TTL_MS = JWT_SESSION_TTL_HOURS * 60 * 60 * 1000; // default 8 jam
+const JWT_SESSION_TTL_HOURS = 1;
+const JWT_SESSION_TTL_MS = JWT_SESSION_TTL_HOURS * 60 * 60 * 1000; // 1 jam khusus Web
 const JWT_SESSION_EXPIRES_IN = `${JWT_SESSION_TTL_HOURS}h`;
 
 const PWA_PERMANENT_TTL_DAYS = 365;

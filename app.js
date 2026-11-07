@@ -209,28 +209,6 @@ app.use(async function (req, res, next) {
         };
         req.authSessionId = decoded.jti || null;
 
-        // Sliding session khusus Web (yang memakai jwt_sessions)
-        if (!isPermanentCookieToken && decoded.jti) {
-          try {
-            var sessionExtension = await extendJwtSessionIfNeeded({
-              id: decoded.jti,
-              userId: decoded.id,
-              token: token,
-              decodedUser: decoded
-            });
-
-            if (sessionExtension && sessionExtension.extended && sessionExtension.token) {
-              res.cookie("accessToken", sessionExtension.token, {
-                ...getAuthCookieOptions(),
-                maxAge: JWT_SESSION_TTL_MS
-              });
-              req.cookies.accessToken = sessionExtension.token;
-            }
-          } catch (extendErr) {
-            // Abaikan error perpanjangan agar request user tetap berjalan normal
-          }
-        }
-
         return next();
       }
     } catch (error) {
@@ -291,17 +269,6 @@ app.use(async function (req, res, next) {
         name: decodedHeader.name
       };
       req.authSessionId = decodedHeader.jti || null;
-
-      if (!isPermanentHeaderToken && decodedHeader.jti) {
-        try {
-          await extendJwtSessionIfNeeded({
-            id: decodedHeader.jti,
-            userId: decodedHeader.id,
-            token: headerToken,
-            decodedUser: null
-          });
-        } catch (extendErr) {}
-      }
 
       return next();
     } catch (error) {

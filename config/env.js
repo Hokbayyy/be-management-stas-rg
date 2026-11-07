@@ -27,7 +27,7 @@ const env = {
     process.env.COOKIE_SAMESITE || (runtimeEnv === "production" ? "none" : "strict")
   ).trim().toLowerCase(),
   cookieDomain: process.env.COOKIE_DOMAIN || null,
-  jwtSessionTtlHours: Number(process.env.JWT_SESSION_TTL_HOURS || 8)
+  jwtSessionTtlHours: Number(process.env.JWT_SESSION_TTL_HOURS || 1)
 };
 
 module.exports = env;

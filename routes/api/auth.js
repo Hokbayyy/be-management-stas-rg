@@ -189,7 +189,7 @@ router.post(
         maxAge: PWA_PERMANENT_TTL_MS
       });
     } else {
-      // Login Web (Laptop/Desktop): Tetap menggunakan session (8 jam) di jwt_sessions
+      // Login Web (Laptop/Desktop): Menggunakan session 1 jam di jwt_sessions
       const sessionId = generateSessionId();
       const expiresAt = new Date(Date.now() + JWT_SESSION_TTL_MS);
       token = jwt.sign(
