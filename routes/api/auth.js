@@ -200,13 +200,6 @@ router.post(
       },
       token
     });
-    if (false) return res.json({
-      user: {
-        tipe: user.role === "mahasiswa" ? user.tipe : undefined,
-        status: user.role === "mahasiswa" ? user.student_status : undefined,
-        studentStatus: user.role === "mahasiswa" ? user.student_status : undefined
-      }
-    });
   })
 );
 

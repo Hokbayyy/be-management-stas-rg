@@ -46,7 +46,8 @@ app.use(logger("dev"));
 // CORS_ORIGIN=https://ms.stas-rg.com,https://app.stas-rg.com
 
 var deployedAllowedOrigins = [
-  "https://ms.stas-rg.com"
+  "https://ms.stas-rg.com",
+  "https://www.ms.stas-rg.com"
 ];
 
 function isLocalOrigin(origin) {
@@ -238,6 +239,9 @@ app.use(async function (req, res, next) {
 
   // Fallback to Authorization header (for API/mobile clients)
   var authHeader = req.headers["authorization"];
+  if (!authHeader && req.method === "GET" && req.query && req.query.access_token && /\/chat\/mqtt-stream$/i.test(req.path || "")) {
+    authHeader = "Bearer " + String(req.query.access_token);
+  }
 
   if (authHeader && authHeader.startsWith("Bearer ")) {
     var headerToken = authHeader.slice(7);

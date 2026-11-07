@@ -180,8 +180,6 @@ async function createNotification({
       url: type === "piket" ? "/picket" : (type === "riset" || type === "deadline" ? "/research" : "/dashboard")
     }).catch(() => {});
   });
-  if (false) (
-  );
 
   return {
     sent: true,
