@@ -1,5 +1,6 @@
 const { query } = require("../db/pool");
 const { getSettingsAsync, DEFAULT_SETTINGS } = require("../config/systemSettingsStore");
+const { sendWebPushToUser } = require("./webPushService");
 
 let notificationsTableReady = false;
 let notificationDispatchTableReady = false;
@@ -167,6 +168,19 @@ async function createNotification({
     VALUES ($1, $2, $3, $4, $5, $6)
     `,
     [notificationId, recipientUserId, senderUserId, type, title, body]
+  );
+
+  setImmediate(() => {
+    sendWebPushToUser(recipientUserId, {
+      id: notificationId,
+      type,
+      title,
+      body,
+      tag: `stasrg-notif-${notificationId}`,
+      url: type === "piket" ? "/picket" : (type === "riset" || type === "deadline" ? "/research" : "/dashboard")
+    }).catch(() => {});
+  });
+  if (false) (
   );
 
   return {

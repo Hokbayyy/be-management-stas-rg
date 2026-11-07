@@ -5,6 +5,7 @@ const { parseBoundedLimit, requireSafeId } = require("../../utils/securityValida
 const { extractRole } = require("../../utils/roleGuard");
 const { createNotification, ensureNotificationsTable, inferNotificationEventId } = require("../../utils/notificationService");
 const { syncStudentAutoReminders } = require("../../utils/studentAutoReminders");
+const { getOrCreateVapidKeys, saveUserPushSubscription } = require("../../utils/webPushService");
 const {
   buildReminderIdentity,
   findExistingDashboardReminder,
@@ -434,6 +435,30 @@ router.post(
       message: "Sinkronisasi pengingat piket dan deadline tugas selesai.",
       ...syncResult
     });
+  })
+);
+
+router.get(
+  "/vapid-public-key",
+  asyncHandler(async (_req, res) => {
+    const keys = await getOrCreateVapidKeys();
+    res.json({ publicKey: keys.publicKey });
+  })
+);
+
+router.post(
+  "/push-subscribe",
+  asyncHandler(async (req, res) => {
+    const requesterUserId = resolveRequesterUserId(req);
+    if (!requesterUserId) {
+      return res.status(401).json({ message: "Autentikasi diperlukan." });
+    }
+    const result = await saveUserPushSubscription({
+      userId: requesterUserId,
+      subscription: req.body?.subscription || req.body,
+      userAgent: req.get("user-agent") || null
+    });
+    res.json(result);
   })
 );
 

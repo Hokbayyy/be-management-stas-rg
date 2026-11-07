@@ -109,6 +109,8 @@ async function autoMigrateDatabase(clientOrPool = pool, { log = console.log, sil
   try {
     const { ensureResearchChatTables } = require("../utils/researchChatService");
     await ensureResearchChatTables(clientOrPool);
+    const { ensurePushTables } = require("../utils/webPushService");
+    await ensurePushTables();
   } catch (err) {
     // ignore
   }
