@@ -326,7 +326,13 @@ async function checkUserIsPm(userId, periodId = null, executor = query) {
 // =============================================================================
 // ENSURE TABLES & CRITERIA (Idempotent Migration Assurance)
 // =============================================================================
+let evaluationTablesEnsured = false;
+
 async function ensureEvaluationTables(executor = query) {
+  if (evaluationTablesEnsured && (executor === query || executor === pool)) {
+    return;
+  }
+
   await runQuery(
     executor,
     `
@@ -385,6 +391,61 @@ async function ensureEvaluationTables(executor = query) {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    -- Ensure scoring_version and weight exist before executing INSERT INTO evaluation_criteria
+    ALTER TABLE evaluation_periods
+      ADD COLUMN IF NOT EXISTS scoring_version TEXT;
+
+    UPDATE evaluation_periods
+    SET scoring_version = 'PM_V1_7CRITERIA'
+    WHERE (type = 'PM_EVALUATION' OR type = 'PM_BIWEEKLY') AND scoring_version IS NULL;
+
+    UPDATE evaluation_periods
+    SET scoring_version = 'PRESENTATION_V1_7CRITERIA'
+    WHERE type = 'MONTHLY_PRESENTATION' AND scoring_version IS NULL;
+
+    ALTER TABLE evaluation_criteria
+      ADD COLUMN IF NOT EXISTS scoring_version TEXT,
+      ADD COLUMN IF NOT EXISTS weight DOUBLE PRECISION NOT NULL DEFAULT 1.0;
+
+    UPDATE evaluation_criteria
+    SET scoring_version = 'PM_V1_7CRITERIA', weight = 1.0 / 7.0
+    WHERE (period_type = 'PM_EVALUATION' OR period_type = 'PM_BIWEEKLY') AND (scoring_version IS NULL OR scoring_version = 'PM_V1_7CRITERIA');
+
+    UPDATE evaluation_criteria
+    SET scoring_version = 'PRESENTATION_V1_7CRITERIA', weight = 1.0 / 7.0
+    WHERE period_type = 'MONTHLY_PRESENTATION' AND (scoring_version IS NULL OR scoring_version = 'PRESENTATION_V1_7CRITERIA');
+
+    ALTER TABLE evaluation_criteria DROP CONSTRAINT IF EXISTS evaluation_criteria_period_type_key_key;
+
+    DO $safe_constraints$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'evaluation_periods'::regclass AND conname = 'chk_evaluation_periods_scoring_version'
+      ) THEN
+        ALTER TABLE evaluation_periods ADD CONSTRAINT chk_evaluation_periods_scoring_version
+          CHECK (scoring_version IN ('PM_V1_7CRITERIA', 'PM_V2_KSA', 'PRESENTATION_V1_7CRITERIA', 'PRESENTATION_V2_KSA'));
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'evaluation_criteria'::regclass AND conname = 'chk_evaluation_criteria_scoring_version'
+      ) THEN
+        ALTER TABLE evaluation_criteria ADD CONSTRAINT chk_evaluation_criteria_scoring_version
+          CHECK (scoring_version IN ('PM_V1_7CRITERIA', 'PM_V2_KSA', 'PRESENTATION_V1_7CRITERIA', 'PRESENTATION_V2_KSA'));
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'evaluation_criteria'::regclass AND conname = 'uq_evaluation_criteria_version_key'
+      ) THEN
+        ALTER TABLE evaluation_criteria ADD CONSTRAINT uq_evaluation_criteria_version_key
+          UNIQUE (scoring_version, key);
+      END IF;
+    EXCEPTION WHEN OTHERS THEN
+      NULL;
+    END $safe_constraints$;
 
     INSERT INTO evaluation_criteria (id, period_type, scoring_version, key, name, description, weight, sort_order, min_score, max_score, is_active)
     VALUES
@@ -596,59 +657,7 @@ async function ensureEvaluationTables(executor = query) {
       ADD COLUMN IF NOT EXISTS division_id TEXT REFERENCES research_divisions(id) ON DELETE SET NULL;
 
     ALTER TABLE evaluation_periods
-      ADD COLUMN IF NOT EXISTS group_id TEXT REFERENCES evaluation_groups(id) ON DELETE SET NULL,
-      ADD COLUMN IF NOT EXISTS scoring_version TEXT;
-
-    UPDATE evaluation_periods
-    SET scoring_version = 'PM_V1_7CRITERIA'
-    WHERE (type = 'PM_EVALUATION' OR type = 'PM_BIWEEKLY') AND scoring_version IS NULL;
-
-    UPDATE evaluation_periods
-    SET scoring_version = 'PRESENTATION_V1_7CRITERIA'
-    WHERE type = 'MONTHLY_PRESENTATION' AND scoring_version IS NULL;
-
-    ALTER TABLE evaluation_criteria
-      ADD COLUMN IF NOT EXISTS scoring_version TEXT,
-      ADD COLUMN IF NOT EXISTS weight DOUBLE PRECISION NOT NULL DEFAULT 1.0;
-
-    UPDATE evaluation_criteria
-    SET scoring_version = 'PM_V1_7CRITERIA', weight = 1.0 / 7.0
-    WHERE (period_type = 'PM_EVALUATION' OR period_type = 'PM_BIWEEKLY') AND (scoring_version IS NULL OR scoring_version = 'PM_V1_7CRITERIA');
-
-    UPDATE evaluation_criteria
-    SET scoring_version = 'PRESENTATION_V1_7CRITERIA', weight = 1.0 / 7.0
-    WHERE period_type = 'MONTHLY_PRESENTATION' AND (scoring_version IS NULL OR scoring_version = 'PRESENTATION_V1_7CRITERIA');
-
-    ALTER TABLE evaluation_criteria DROP CONSTRAINT IF EXISTS evaluation_criteria_period_type_key_key;
-
-    DO $safe_constraints$
-    BEGIN
-      IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conrelid = 'evaluation_periods'::regclass AND conname = 'chk_evaluation_periods_scoring_version'
-      ) THEN
-        ALTER TABLE evaluation_periods ADD CONSTRAINT chk_evaluation_periods_scoring_version
-          CHECK (scoring_version IN ('PM_V1_7CRITERIA', 'PM_V2_KSA', 'PRESENTATION_V1_7CRITERIA', 'PRESENTATION_V2_KSA'));
-      END IF;
-
-      IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conrelid = 'evaluation_criteria'::regclass AND conname = 'chk_evaluation_criteria_scoring_version'
-      ) THEN
-        ALTER TABLE evaluation_criteria ADD CONSTRAINT chk_evaluation_criteria_scoring_version
-          CHECK (scoring_version IN ('PM_V1_7CRITERIA', 'PM_V2_KSA', 'PRESENTATION_V1_7CRITERIA', 'PRESENTATION_V2_KSA'));
-      END IF;
-
-      IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint
-        WHERE conrelid = 'evaluation_criteria'::regclass AND conname = 'uq_evaluation_criteria_version_key'
-      ) THEN
-        ALTER TABLE evaluation_criteria ADD CONSTRAINT uq_evaluation_criteria_version_key
-          UNIQUE (scoring_version, key);
-      END IF;
-    EXCEPTION WHEN OTHERS THEN
-      NULL;
-    END $safe_constraints$;
+      ADD COLUMN IF NOT EXISTS group_id TEXT REFERENCES evaluation_groups(id) ON DELETE SET NULL;
 
     CREATE TABLE IF NOT EXISTS evaluation_emergency_audits (
       id TEXT PRIMARY KEY,
@@ -681,6 +690,7 @@ async function ensureEvaluationTables(executor = query) {
     );
     `
   );
+  evaluationTablesEnsured = true;
 }
 
 // =============================================================================
@@ -2888,6 +2898,202 @@ async function savePmEvaluationSubmission(assignmentId, evaluatorId, payload = {
   }
 }
 
+async function resetPmEvaluationSubmission(assignmentId, actor, executor = pool) {
+  await ensureEvaluationTables(executor);
+
+  if (!actor || !actor.id) {
+    throw createHttpError("Autentikasi diperlukan.", 401);
+  }
+
+  const isPool = typeof executor?.connect === "function" && typeof executor?.release !== "function";
+  const client = isPool ? await executor.connect() : executor;
+  const ownsTransaction = isPool;
+
+  try {
+    if (ownsTransaction) await client.query("BEGIN");
+
+    const asnRes = await runQuery(
+      client,
+      `
+      SELECT ea.*, ep.status AS period_status, ep.title AS period_title
+      FROM evaluation_assignments ea
+      JOIN evaluation_periods ep ON ep.id = ea.period_id
+      WHERE ea.id = $1
+      FOR UPDATE OF ea
+      `,
+      [assignmentId]
+    );
+
+    if (asnRes.rowCount === 0) {
+      throw createHttpError("Penugasan evaluasi tidak ditemukan.", 404);
+    }
+    const assignment = asnRes.rows[0];
+
+    if (assignment.period_status === "CLOSED") {
+      throw createHttpError("Periode evaluasi telah ditutup permanen. Nilai tidak dapat diubah atau dihapus.", 409);
+    }
+
+    const isOwner = assignment.evaluator_id === actor.id;
+    const isOperator = actor.role === "operator";
+    if (!isOwner && !isOperator) {
+      throw createHttpError("Akses ditolak. Anda tidak berhak menghapus penilaian ini.", 403);
+    }
+
+    // Delete individual score items first
+    await runQuery(
+      client,
+      `
+      DELETE FROM evaluation_score_items
+      WHERE submission_id IN (
+        SELECT id FROM evaluation_submissions WHERE assignment_id = $1
+      )
+      `,
+      [assignmentId]
+    );
+
+    // Delete submission record
+    await runQuery(
+      client,
+      "DELETE FROM evaluation_submissions WHERE assignment_id = $1",
+      [assignmentId]
+    );
+
+    // Reset assignment status to PENDING
+    await runQuery(
+      client,
+      "UPDATE evaluation_assignments SET status = 'PENDING', updated_at = NOW() WHERE id = $1",
+      [assignmentId]
+    );
+
+    if (ownsTransaction) await client.query("COMMIT");
+
+    return await getPmAssignmentById(assignmentId, client);
+  } catch (error) {
+    if (ownsTransaction) await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    if (ownsTransaction) client.release();
+  }
+}
+
+async function dropStudentFromPeriod(periodId, studentId, actor, { reason = "" } = {}, executor = pool) {
+  await ensureEvaluationTables(executor);
+
+  if (!actor || !actor.id) {
+    throw createHttpError("Autentikasi diperlukan.", 401);
+  }
+
+  const isPool = typeof executor?.connect === "function" && typeof executor?.release !== "function";
+  const client = isPool ? await executor.connect() : executor;
+  const ownsTransaction = isPool;
+
+  try {
+    if (ownsTransaction) await client.query("BEGIN");
+
+    const periodRes = await runQuery(
+      client,
+      "SELECT * FROM evaluation_periods WHERE id = $1 FOR UPDATE",
+      [periodId]
+    );
+    if (periodRes.rowCount === 0) {
+      throw createHttpError("Periode evaluasi tidak ditemukan.", 404);
+    }
+    const period = periodRes.rows[0];
+
+    if (period.status === "CLOSED") {
+      throw createHttpError("Periode evaluasi telah ditutup permanen. Mahasiswa tidak dapat dikeluarkan dari periode ini.", 409);
+    }
+
+    const student = await resolveStudentRecord(studentId, client);
+    if (!student) {
+      throw createHttpError("Mahasiswa tidak ditemukan.", 404);
+    }
+
+    const isOperator = actor.role === "operator";
+    if (!isOperator) {
+      const isAssigned = await runQuery(
+        client,
+        "SELECT 1 FROM evaluation_assignments WHERE period_id = $1 AND student_id = $2 AND evaluator_id = $3 LIMIT 1",
+        [periodId, student.id, actor.id]
+      );
+      if (isAssigned.rowCount === 0) {
+        throw createHttpError("Akses ditolak. Anda tidak berhak mengeluarkan mahasiswa ini.", 403);
+      }
+    }
+
+    // 1. Delete score items and submissions for this student in this period
+    await runQuery(
+      client,
+      `
+      DELETE FROM evaluation_score_items
+      WHERE submission_id IN (
+        SELECT id FROM evaluation_submissions
+        WHERE period_id = $1 AND student_id = $2
+      )
+      `,
+      [periodId, student.id]
+    );
+
+    await runQuery(
+      client,
+      "DELETE FROM evaluation_submissions WHERE period_id = $1 AND student_id = $2",
+      [periodId, student.id]
+    );
+
+    // 2. Delete assignments for this student in this period
+    const delAsnRes = await runQuery(
+      client,
+      "DELETE FROM evaluation_assignments WHERE period_id = $1 AND student_id = $2 RETURNING id",
+      [periodId, student.id]
+    );
+
+    // 3. Clean up manual student mapping in group if present
+    if (period.group_id) {
+      await runQuery(
+        client,
+        "DELETE FROM evaluation_group_students WHERE group_id = $1 AND student_id = $2",
+        [period.group_id, student.id]
+      );
+    }
+
+    if (ownsTransaction) await client.query("COMMIT");
+
+    return {
+      success: true,
+      message: `Mahasiswa ${student.name} berhasil dikeluarkan dari penilaian periode ini.`,
+      studentId: student.id,
+      studentName: student.name,
+      periodId: period.id,
+      deletedAssignmentsCount: delAsnRes.rowCount
+    };
+  } catch (error) {
+    if (ownsTransaction) await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    if (ownsTransaction) client.release();
+  }
+}
+
+async function dropPmAssignment(assignmentId, actor, { reason = "" } = {}, executor = pool) {
+  await ensureEvaluationTables(executor);
+
+  if (!actor || !actor.id) {
+    throw createHttpError("Autentikasi diperlukan.", 401);
+  }
+
+  const asnRes = await runQuery(
+    executor,
+    "SELECT period_id, student_id FROM evaluation_assignments WHERE id = $1 LIMIT 1",
+    [assignmentId]
+  );
+  if (asnRes.rowCount === 0) {
+    throw createHttpError("Penugasan evaluasi tidak ditemukan.", 404);
+  }
+
+  const assignment = asnRes.rows[0];
+  return await dropStudentFromPeriod(assignment.period_id, assignment.student_id, actor, { reason }, executor);
+}
+
 // =============================================================================
 // PRESENTATION SESSIONS
 // =============================================================================
@@ -4002,6 +4208,8 @@ async function getStudentEvaluationHistory(studentIdOrUserId, optionsOrExecutor 
   const periodMap = new Map();
   for (const row of pmAssignmentsRes.rows) {
     if (!periodMap.has(row.period_id)) {
+      const formattedStartDate = formatDateOnly(row.start_date);
+      const formattedEndDate = formatDateOnly(row.end_date);
       periodMap.set(row.period_id, {
         periodId: row.period_id,
         periodTitle: row.period_title,
@@ -4009,9 +4217,9 @@ async function getStudentEvaluationHistory(studentIdOrUserId, optionsOrExecutor 
         periodStatus: row.period_status,
         scoringVersion: row.period_scoring_version || null,
         scoring_version: row.period_scoring_version || null,
-        startDate: formatDateOnly(row.start_date),
-        endDate: formatDateOnly(row.end_date),
-        evaluationMonth: row.start_date ? formatDateOnly(row.start_date).slice(0, 7) : null,
+        startDate: formattedStartDate,
+        endDate: formattedEndDate,
+        evaluationMonth: formattedStartDate ? formattedStartDate.slice(0, 7) : null,
         divisionName: row.division_name,
         evaluations: []
       });
@@ -4021,7 +4229,7 @@ async function getStudentEvaluationHistory(studentIdOrUserId, optionsOrExecutor 
 
   const pmEvaluationsList = [];
   for (const [pId, pData] of periodMap.entries()) {
-    const evals = pData.evaluations;
+    const evals = pData.evaluations || [];
     const totalEvaluators = evals.length;
     const presentEvaluators = evals.filter((e) => e.attendance_status === "PRESENT").length;
     const absentEvaluators = evals.filter((e) => e.attendance_status === "ABSENT").length;
@@ -4057,10 +4265,10 @@ async function getStudentEvaluationHistory(studentIdOrUserId, optionsOrExecutor 
       continue;
     }
 
-    const primarySub = presentSubmitted[0] || evals.find((e) => e.submission_status === "SUBMITTED") || evals[0];
+    const primarySub = presentSubmitted[0] || evals.find((e) => e.submission_status === "SUBMITTED") || evals[0] || {};
 
     pmEvaluationsList.push({
-      submissionId: primarySub.submission_id || primarySub.assignment_id,
+      submissionId: primarySub.submission_id || primarySub.assignment_id || null,
       periodId: pData.periodId,
       periodTitle: pData.periodTitle,
       periodType: pData.periodType,
@@ -4072,7 +4280,7 @@ async function getStudentEvaluationHistory(studentIdOrUserId, optionsOrExecutor 
       startDate: pData.startDate,
       endDate: pData.endDate,
       divisionName: pData.divisionName,
-      evaluatorName: evals.map((e) => e.evaluator_name).join(", "),
+      evaluatorName: evals.map((e) => e.evaluator_name).filter(Boolean).join(", "),
       status, // FINAL, PROVISIONAL, INCOMPLETE, EXEMPT
       overallScore: resultAvailable ? (finalScore != null ? finalScore : (isStudent ? null : provisionalScore)) : null,
       strength: resultAvailable ? (evals.map((e) => e.strength).filter(Boolean).join("; ") || null) : null,
@@ -4207,5 +4415,8 @@ module.exports = {
   createMonitoringGrant,
   revokeMonitoringGrant,
   listMonitoringGrants,
-  hasActiveMonitoringGrant
+  hasActiveMonitoringGrant,
+  resetPmEvaluationSubmission,
+  dropStudentFromPeriod,
+  dropPmAssignment
 };

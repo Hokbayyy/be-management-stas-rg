@@ -19,6 +19,9 @@ const {
   revokeMonitoringGrant,
   listMonitoringGrants,
   hasActiveMonitoringGrant,
+  resetPmEvaluationSubmission,
+  dropStudentFromPeriod,
+  dropPmAssignment,
   INITIAL_PM_CRITERIA,
   INITIAL_PRESENTATION_CRITERIA,
   KSA_PM_CRITERIA,
@@ -2006,4 +2009,186 @@ test("Regression 17: Object-based payload.scores is accepted for savePmEvaluatio
 
   assert.equal(savedOverall, 8.0);
   assert.equal(savedScores.length, 3);
+});
+
+test("Policy 3: resetPmEvaluationSubmission allows resetting submission on OPEN period and rejects on CLOSED period", async () => {
+  const assignment = {
+    id: "ASN-RESET-1",
+    period_id: "EVP-RESET-1",
+    student_id: "STD-RESET-1",
+    evaluator_id: "USER-PM-RESET",
+    status: "SUBMITTED",
+    period_status: "OPEN",
+    period_title: "Periode Reset Test"
+  };
+
+  let deletedScoreItems = false;
+  let deletedSubmission = false;
+  let updatedAssignmentStatus = null;
+
+  const createMock = (overridePeriodStatus = "OPEN") => ({
+    query: async (sql, params) => {
+      const q = sql.trim();
+      if (q === "BEGIN" || q === "COMMIT" || q === "ROLLBACK") return { rows: [], rowCount: 0 };
+      if (q.includes("information_schema.tables")) return { rows: [{ exists: true }] };
+      if (q.includes("FOR UPDATE")) {
+        return {
+          rows: [{
+            ...assignment,
+            period_status: overridePeriodStatus
+          }],
+          rowCount: 1
+        };
+      }
+      if (q.includes("DELETE FROM evaluation_score_items")) {
+        deletedScoreItems = true;
+        return { rows: [], rowCount: 3 };
+      }
+      if (q.includes("DELETE FROM evaluation_submissions")) {
+        deletedSubmission = true;
+        return { rows: [], rowCount: 1 };
+      }
+      if (q.includes("UPDATE evaluation_assignments SET status = 'PENDING'")) {
+        updatedAssignmentStatus = "PENDING";
+        return { rows: [], rowCount: 1 };
+      }
+      if (q.includes("FROM evaluation_assignments ea")) {
+        return {
+          rows: [{
+            ...assignment,
+            status: updatedAssignmentStatus || "PENDING",
+            submission_id: null,
+            submission_status: null,
+            period_status: overridePeriodStatus
+          }],
+          rowCount: 1
+        };
+      }
+      if (q.includes("FROM evaluation_criteria")) {
+        return { rows: [], rowCount: 0 };
+      }
+      return { rows: [], rowCount: 0 };
+    }
+  });
+
+  // 1. Rejects if period is CLOSED
+  await assert.rejects(
+    async () => {
+      await resetPmEvaluationSubmission("ASN-RESET-1", { id: "USER-PM-RESET", role: "mahasiswa" }, createMock("CLOSED"));
+    },
+    (err) => {
+      assert.equal(err.statusCode, 409);
+      assert.match(err.message, /ditutup permanen/i);
+      return true;
+    }
+  );
+
+  // 2. Rejects if unauthorized third-party tries to reset
+  await assert.rejects(
+    async () => {
+      await resetPmEvaluationSubmission("ASN-RESET-1", { id: "OTHER-USER", role: "mahasiswa" }, createMock("OPEN"));
+    },
+    (err) => {
+      assert.equal(err.statusCode, 403);
+      assert.match(err.message, /Akses ditolak/i);
+      return true;
+    }
+  );
+
+  // 3. Evaluator owner succeeds on OPEN period
+  const updated = await resetPmEvaluationSubmission("ASN-RESET-1", { id: "USER-PM-RESET", role: "mahasiswa" }, createMock("OPEN"));
+  assert.equal(deletedScoreItems, true);
+  assert.equal(deletedSubmission, true);
+  assert.equal(updatedAssignmentStatus, "PENDING");
+  assert.equal(updated.status, "PENDING");
+
+  // 4. Operator can also reset
+  const updatedByAdmin = await resetPmEvaluationSubmission("ASN-RESET-1", { id: "ADMIN-USER", role: "operator" }, createMock("OPEN"));
+  assert.equal(updatedByAdmin.status, "PENDING");
+});
+
+test("Policy 4: dropStudentFromPeriod drops student assignments on OPEN period and rejects on CLOSED period", async () => {
+  const period = {
+    id: "EVP-DROP-1",
+    title: "Periode Drop Test",
+    status: "OPEN",
+    group_id: "GRP-SW"
+  };
+
+  const student = {
+    id: "STD-DROP-1",
+    user_id: "USR-MHS-DROP",
+    name: "Mahasiswa Salah Plotting",
+    nim: "1301210099"
+  };
+
+  let deletedScoreItems = false;
+  let deletedSubmissions = false;
+  let deletedAssignments = false;
+  let deletedGroupStudent = false;
+
+  const createMock = (overridePeriodStatus = "OPEN") => ({
+    query: async (sql, params) => {
+      const q = sql.trim();
+      if (q === "BEGIN" || q === "COMMIT" || q === "ROLLBACK") return { rows: [], rowCount: 0 };
+      if (q.includes("information_schema.tables")) return { rows: [{ exists: true }] };
+      if (q.includes("FROM evaluation_periods WHERE id = $1")) {
+        return {
+          rows: [{ ...period, status: overridePeriodStatus }],
+          rowCount: 1
+        };
+      }
+      if (q.includes("FROM students s") || q.includes("WHERE s.id = $1 OR s.user_id = $1")) {
+        return {
+          rows: [student],
+          rowCount: 1
+        };
+      }
+      if (q.includes("SELECT 1 FROM evaluation_assignments WHERE period_id = $1 AND student_id = $2 AND evaluator_id = $3")) {
+        return { rows: [{ "?column?": 1 }], rowCount: 1 };
+      }
+      if (q.includes("DELETE FROM evaluation_score_items")) {
+        deletedScoreItems = true;
+        return { rows: [], rowCount: 2 };
+      }
+      if (q.includes("DELETE FROM evaluation_submissions WHERE period_id = $1 AND student_id = $2")) {
+        deletedSubmissions = true;
+        return { rows: [], rowCount: 1 };
+      }
+      if (q.includes("DELETE FROM evaluation_assignments WHERE period_id = $1 AND student_id = $2")) {
+        deletedAssignments = true;
+        return { rows: [{ id: "ASN-DROP-1" }], rowCount: 1 };
+      }
+      if (q.includes("DELETE FROM evaluation_group_students")) {
+        deletedGroupStudent = true;
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }
+  });
+
+  // 1. Rejects if period is CLOSED
+  await assert.rejects(
+    async () => {
+      await dropStudentFromPeriod("EVP-DROP-1", "STD-DROP-1", { id: "OP001", role: "operator" }, {}, createMock("CLOSED"));
+    },
+    (err) => {
+      assert.equal(err.statusCode, 409);
+      assert.match(err.message, /ditutup permanen/i);
+      return true;
+    }
+  );
+
+  // 2. Operator succeeds dropping student on OPEN period
+  const dropResult = await dropStudentFromPeriod("EVP-DROP-1", "STD-DROP-1", { id: "OP001", role: "operator" }, { reason: "Salah plotting hardware ke software" }, createMock("OPEN"));
+  assert.equal(dropResult.success, true);
+  assert.equal(dropResult.deletedAssignmentsCount, 1);
+  assert.equal(deletedScoreItems, true);
+  assert.equal(deletedSubmissions, true);
+  assert.equal(deletedAssignments, true);
+  assert.equal(deletedGroupStudent, true);
+
+  // 3. Assigned PM can also drop
+  const dropResultPm = await dropStudentFromPeriod("EVP-DROP-1", "STD-DROP-1", { id: "PM-EVAL-1", role: "mahasiswa" }, {}, createMock("OPEN"));
+  assert.equal(dropResultPm.success, true);
 });

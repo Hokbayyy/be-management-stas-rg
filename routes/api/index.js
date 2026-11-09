@@ -33,6 +33,7 @@ const graduationSubmissionsRouter = require("./graduationSubmissions");
 const documentCenterRouter = require("./documentCenter");
 const reactivationsRouter = require("./reactivations");
 const evaluationsRouter = require("./evaluations");
+const surveysRouter = require("./surveys");
 const rbacRouter = require("./rbac");
 const { requireRoleStrict } = require("../../utils/roleGuard");
 
@@ -90,5 +91,6 @@ router.use("/graduation-submissions", requireRoleStrict(["mahasiswa", "operator"
 router.use("/reactivations", requireRoleStrict(["mahasiswa", "operator", "admin"]), reactivationsRouter);
 router.use("/document-center", documentCenterRouter);
 router.use("/evaluations", evaluationsRouter);
+router.use("/surveys", surveysRouter);
 
 module.exports = router;

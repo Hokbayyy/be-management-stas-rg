@@ -61,7 +61,10 @@ const {
   createMonitoringGrant,
   revokeMonitoringGrant,
   listMonitoringGrants,
-  hasActiveMonitoringGrant
+  hasActiveMonitoringGrant,
+  resetPmEvaluationSubmission,
+  dropStudentFromPeriod,
+  dropPmAssignment
 } = require("../../utils/evaluationService");
 const { resolveStudentId, resolveStudentRecord } = require("../../utils/studentResolver");
 
@@ -219,6 +222,17 @@ router.post(
     if (!requireAdmin(req, res)) return;
     const id = requireSafeId(req.params.id, "id");
     const result = await executeEmergencyActionOnPeriod(id, req.body, req.authUser);
+    res.json(result);
+  })
+);
+
+router.post(
+  "/periods/:id/drop-student",
+  asyncHandler(async (req, res) => {
+    if (!requireAuth(req, res)) return;
+    const id = requireSafeId(req.params.id, "id");
+    const studentId = requireSafeId(req.body?.studentId || req.query?.studentId, "studentId");
+    const result = await dropStudentFromPeriod(id, studentId, req.authUser, { reason: req.body?.reason || req.query?.reason });
     res.json(result);
   })
 );
@@ -728,6 +742,31 @@ router.put(
   })
 );
 
+router.delete(
+  "/pm/assignments/:id/submission",
+  asyncHandler(async (req, res) => {
+    if (!requireAuth(req, res)) return;
+    const id = requireSafeId(req.params.id, "id");
+    const updated = await resetPmEvaluationSubmission(id, req.authUser);
+    res.json({
+      message: "Submit nilai berhasil dibatalkan. Status penilaian kembali ke belum dinilai.",
+      assignment: updated
+    });
+  })
+);
+
+router.delete(
+  "/pm/assignments/:id",
+  asyncHandler(async (req, res) => {
+    if (!requireAuth(req, res)) return;
+    const id = requireSafeId(req.params.id, "id");
+    const result = await dropPmAssignment(id, req.authUser, {
+      reason: req.body?.reason || req.query?.reason
+    });
+    res.json(result);
+  })
+);
+
 // =============================================================================
 // PRESENTATION SESSIONS
 // =============================================================================
@@ -980,8 +1019,21 @@ router.get(
   asyncHandler(async (req, res) => {
     if (!requireAuth(req, res)) return;
     const { userId, isStudent } = getRequester(req);
-    const history = await getStudentEvaluationHistory(userId, { isStudent });
-    res.json(history);
+    try {
+      const history = await getStudentEvaluationHistory(userId, { isStudent });
+      res.json(history);
+    } catch (err) {
+      // Safe fallback if user has no student profile (e.g. testing with operator/lecturer account)
+      if (err.statusCode === 404 || /tidak ditemukan/i.test(err.message || "")) {
+        return res.json({
+          student: null,
+          pmEvaluations: [],
+          presentationEvaluations: [],
+          presentationSlots: []
+        });
+      }
+      throw err;
+    }
   })
 );
 
