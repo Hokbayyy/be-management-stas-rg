@@ -1,5 +1,13 @@
 const { query } = require("../db/pool");
 const { normalizeHolidays } = require("../utils/holidays");
+const {
+  DEFAULT_GPS_MAX_ACCURACY_ALLOWANCE_METERS,
+  DEFAULT_GPS_MAX_ACCURACY_METERS,
+  DEFAULT_GPS_RADIUS_METERS,
+  DEFAULT_GPS_SAMPLE_COUNT,
+  DEFAULT_GPS_TIMEOUT_MS,
+  parseGpsNumber
+} = require("../utils/gpsValidation");
 
 const DEFAULT_SETTINGS = {
   umum: {
@@ -10,12 +18,13 @@ const DEFAULT_SETTINGS = {
     logoDataUrl: null
   },
   gps: {
-    latitude: -6.87361,
-    longitude: 107.60510,
-    radius: 80,
-    maxAccuracyMeters: 100,
-    sampleCount: 2,
-    timeoutMs: 6000
+    latitude: -6.973185,
+    longitude: 107.632543,
+    radius: DEFAULT_GPS_RADIUS_METERS,
+    maxAccuracyMeters: DEFAULT_GPS_MAX_ACCURACY_METERS,
+    maxAccuracyAllowanceMeters: DEFAULT_GPS_MAX_ACCURACY_ALLOWANCE_METERS,
+    sampleCount: DEFAULT_GPS_SAMPLE_COUNT,
+    timeoutMs: DEFAULT_GPS_TIMEOUT_MS
   },
   cuti: {
     maxSemesterDays: 3,
@@ -79,12 +88,20 @@ function mergeSettings(current, patch) {
     ? normalizeHolidays(sourceHolidays)
     : normalizeHolidays(currentAttendanceRules.holidays);
 
+  const mergedGps = { ...(current.gps || {}) };
+  for (const [key, value] of Object.entries(normalize(source.gps))) {
+    const numeric = parseGpsNumber(value);
+    if (numeric != null) {
+      mergedGps[key] = numeric;
+    }
+  }
+
   return {
     ...current,
     ...source,
     holidays,
     umum: { ...(current.umum || {}), ...(source.umum || {}) },
-    gps: { ...(current.gps || {}), ...(source.gps || {}) },
+    gps: mergedGps,
     cuti: { ...(current.cuti || {}), ...(source.cuti || {}) },
     notif: {
       ...(current.notif || {}),

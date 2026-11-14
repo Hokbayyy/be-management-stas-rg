@@ -2,6 +2,7 @@ const express = require("express");
 const asyncHandler = require("../../utils/asyncHandler");
 const { extractRole } = require("../../utils/roleGuard");
 const { getSettingsAsync, updateSettings } = require("../../config/systemSettingsStore");
+const { sanitizeGpsSettingsPatch } = require("../../utils/gpsValidation");
 const {
   deactivateAttendanceAbsentLocksForConfiguredHolidays,
   deactivatePicketLocksCoveredByEffectiveHolidays
@@ -39,7 +40,17 @@ router.patch(
     if (role !== "operator") {
       return res.status(403).json({ message: "Akses ditolak." });
     }
-    const settings = await updateSettings(req.body || {});
+    const patchBody = req.body && typeof req.body === "object" ? { ...req.body } : {};
+    if (Object.prototype.hasOwnProperty.call(patchBody, "gps")) {
+      const currentSettings = await getSettingsAsync();
+      const sanitizedGps = sanitizeGpsSettingsPatch(patchBody.gps, currentSettings.gps || {});
+      if (!sanitizedGps.valid) {
+        return res.status(400).json({ message: sanitizedGps.message });
+      }
+      patchBody.gps = sanitizedGps.gps;
+    }
+
+    const settings = await updateSettings(patchBody);
     const [deactivatedAttendanceAbsentLockIds, deactivatedPicketLockIds] = await Promise.all([
       deactivateAttendanceAbsentLocksForConfiguredHolidays(settings),
       deactivatePicketLocksCoveredByEffectiveHolidays({ settings })

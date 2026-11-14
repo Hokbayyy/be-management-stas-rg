@@ -39,6 +39,14 @@ const {
   buildRisetWeeklyMonitorFields,
   normalizeRisetWeeklyMinHours
 } = require("../../utils/risetWeeklyMonitor");
+const {
+  parseGpsNumber,
+  isValidLatitude,
+  isValidLongitude,
+  buildGpsPolicy,
+  buildGpsValidationError,
+  evaluateAttendanceGps
+} = require("../../utils/gpsValidation");
 
 const router = express.Router();
 
@@ -110,27 +118,6 @@ function isCheckInAfterCutoff(date = new Date()) {
 }
 
 let ensureAttendanceColumnsPromise = null;
-
-function toRadians(value) {
-  return (value * Math.PI) / 180;
-}
-
-function haversineDistanceMeters(lat1, lng1, lat2, lng2) {
-  const earthRadius = 6371000;
-  const dLat = toRadians(lat2 - lat1);
-  const dLng = toRadians(lng2 - lng1);
-
-  const partA =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRadians(lat1)) *
-      Math.cos(toRadians(lat2)) *
-      Math.sin(dLng / 2) *
-      Math.sin(dLng / 2);
-
-  const partC = 2 * Math.atan2(Math.sqrt(partA), Math.sqrt(1 - partA));
-
-  return earthRadius * partC;
-}
 
 function calculateDurationHours(startDate, endDate = new Date()) {
   const start = new Date(startDate);
@@ -349,53 +336,6 @@ async function hasApprovedLeaveOnDate(studentId, dateIso) {
   return result.rowCount > 0;
 }
 
-function parseGpsNumber(value) {
-  if (value == null || value === "") return null;
-  if (typeof value === "string" && !value.trim()) return null;
-
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function isValidLatitude(value) {
-  return Number.isFinite(value) && value >= -90 && value <= 90;
-}
-
-function isValidLongitude(value) {
-  return Number.isFinite(value) && value >= -180 && value <= 180;
-}
-
-function buildGpsPolicy(settings) {
-  const gps = settings.gps || {};
-
-  return {
-    targetLatitude: Number(gps.latitude),
-    targetLongitude: Number(gps.longitude),
-    radiusMeters: Number(gps.radius || 80),
-    maxAccuracyMeters: Number(gps.maxAccuracyMeters || 100),
-    sampleCount: Number(gps.sampleCount || 2),
-    timeoutMs: Number(gps.timeoutMs || 6000)
-  };
-}
-
-function buildGpsValidationError({
-  message,
-  reason,
-  accuracyMeters = null,
-  maxAccuracyMeters = null,
-  distanceMeters = null,
-  allowedRadiusMeters = null
-}) {
-  return {
-    message,
-    reason,
-    accuracyMeters,
-    maxAccuracyMeters,
-    distanceMeters,
-    allowedRadiusMeters
-  };
-}
-
 /**
  * Check if student has approved WFH or Tugas Luar leave on today's date.
  * Remote students can skip GPS radius validation.
@@ -568,56 +508,25 @@ router.post(
     }
 
     const gpsPolicy = buildGpsPolicy(settings);
+    const gpsEvaluation = evaluateAttendanceGps({
+      userLatitude,
+      userLongitude,
+      accuracyMeters: accuracyMetersValue,
+      gpsPolicy,
+      actionLabel: "checkin"
+    });
 
-    const refLat = gpsPolicy.targetLatitude;
-    const refLng = gpsPolicy.targetLongitude;
-    const refRadius = gpsPolicy.radiusMeters;
-    const maxAccuracyMeters = gpsPolicy.maxAccuracyMeters;
-
-    if (!isValidLatitude(refLat) || !isValidLongitude(refLng) || !Number.isFinite(refRadius) || refRadius <= 0) {
-      return res.status(500).json(
-        buildGpsValidationError({
-          message: "Koordinat titik absensi belum dikonfigurasi. Hubungi operator.",
-          reason: "GPS_NOT_CONFIGURED",
-          accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue),
-          maxAccuracyMeters: Number.isFinite(maxAccuracyMeters) ? maxAccuracyMeters : null,
-          allowedRadiusMeters: Number.isFinite(refRadius) ? refRadius : null
-        })
-      );
+    if (gpsEvaluation.errorBody?.reason === "GPS_NOT_CONFIGURED") {
+      return res.status(gpsEvaluation.statusCode).json(gpsEvaluation.errorBody);
     }
 
-    const distanceMeters = haversineDistanceMeters(userLatitude, userLongitude, refLat, refLng);
+    const distanceMeters = gpsEvaluation.distanceMeters;
 
     // Check if student has approved remote attendance (WFH or Tugas Luar) for today; if so, bypass GPS radius validation
     const remoteInfo = await getApprovedRemoteAttendanceToday(resolvedStudentId, todayIso);
 
-    if (!remoteInfo.isRemote) {
-      // Remote attendance not approved: enforce GPS accuracy and radius checks
-      if (accuracyMetersValue != null && Number.isFinite(maxAccuracyMeters) && accuracyMetersValue > maxAccuracyMeters) {
-        return res.status(400).json(
-          buildGpsValidationError({
-            message: "Akurasi GPS terlalu rendah. Coba pindah ke area terbuka atau aktifkan mode akurasi tinggi.",
-            reason: "GPS_ACCURACY_TOO_LOW",
-            accuracyMeters: Math.round(accuracyMetersValue),
-            maxAccuracyMeters,
-            distanceMeters: Math.round(distanceMeters),
-            allowedRadiusMeters: refRadius
-          })
-        );
-      }
-
-      if (distanceMeters > refRadius) {
-        return res.status(400).json(
-          buildGpsValidationError({
-            message: "Lokasi di luar radius absensi.",
-            reason: "OUTSIDE_RADIUS",
-            accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue),
-            maxAccuracyMeters,
-            distanceMeters: Math.round(distanceMeters),
-            allowedRadiusMeters: refRadius
-          })
-        );
-      }
+    if (!remoteInfo.isRemote && !gpsEvaluation.ok) {
+      return res.status(gpsEvaluation.statusCode).json(gpsEvaluation.errorBody);
     }
 
     const todayRecord = await query(
@@ -687,9 +596,11 @@ router.post(
       isTugasLuar: remoteInfo.isTugasLuar,
       status: attendanceStatus,
       accuracyMeters: accuracyMetersValue == null ? null : Math.round(accuracyMetersValue),
-      maxAccuracyMeters,
+      maxAccuracyMeters: gpsPolicy.maxAccuracyMeters,
       distanceMeters: Math.round(distanceMeters),
-      allowedRadiusMeters: refRadius
+      allowedRadiusMeters: gpsPolicy.radiusMeters,
+      accuracyAllowanceMeters: gpsEvaluation.accuracyAllowanceMeters,
+      effectiveAllowedRadiusMeters: gpsEvaluation.effectiveAllowedRadiusMeters
     });
   })
 );
@@ -828,40 +739,23 @@ router.post(
 
     // Validasi radius GPS checkout (kecuali WFH atau Tugas Luar)
     const remoteCheckout = await getApprovedRemoteAttendanceToday(resolvedStudentId, todayIso);
-    if (!remoteCheckout.isRemote && role === "mahasiswa") {
-      const gpsPolicy = buildGpsPolicy(settings);
-      const refLat = gpsPolicy.targetLatitude;
-      const refLng = gpsPolicy.targetLongitude;
-      const refRadius = gpsPolicy.radiusMeters;
-      const maxAccuracyMeters = gpsPolicy.maxAccuracyMeters;
+    const checkoutGpsPolicy = buildGpsPolicy(settings);
+    const checkoutGpsEvaluation =
+      isValidLatitude(checkoutGpsPolicy.targetLatitude) &&
+      isValidLongitude(checkoutGpsPolicy.targetLongitude) &&
+      Number.isFinite(checkoutGpsPolicy.radiusMeters) &&
+      checkoutGpsPolicy.radiusMeters > 0
+        ? evaluateAttendanceGps({
+            userLatitude,
+            userLongitude,
+            accuracyMeters: accuracyMetersValue,
+            gpsPolicy: checkoutGpsPolicy,
+            actionLabel: "checkout"
+          })
+        : null;
 
-      if (isValidLatitude(refLat) && isValidLongitude(refLng) && Number.isFinite(refRadius) && refRadius > 0) {
-        if (Number.isFinite(maxAccuracyMeters) && accuracyMetersValue > maxAccuracyMeters) {
-          return res.status(400).json(
-            buildGpsValidationError({
-              message: "Akurasi GPS terlalu rendah untuk checkout.",
-              reason: "GPS_ACCURACY_TOO_LOW",
-              accuracyMeters: Math.round(accuracyMetersValue),
-              maxAccuracyMeters,
-              allowedRadiusMeters: refRadius
-            })
-          );
-        }
-
-        const checkoutDistance = haversineDistanceMeters(userLatitude, userLongitude, refLat, refLng);
-        if (checkoutDistance > refRadius) {
-          return res.status(400).json(
-            buildGpsValidationError({
-              message: "Lokasi checkout di luar radius absensi.",
-              reason: "OUTSIDE_RADIUS",
-              accuracyMeters: Math.round(accuracyMetersValue),
-              maxAccuracyMeters,
-              distanceMeters: Math.round(checkoutDistance),
-              allowedRadiusMeters: refRadius
-            })
-          );
-        }
-      }
+    if (!remoteCheckout.isRemote && role === "mahasiswa" && checkoutGpsEvaluation && !checkoutGpsEvaluation.ok) {
+      return res.status(checkoutGpsEvaluation.statusCode).json(checkoutGpsEvaluation.errorBody);
     }
 
     const durationHoursValue = calculateDurationHours(todayRecord.rows[0].check_in_at);
@@ -924,6 +818,16 @@ router.post(
 
     res.json({
       message: "Check-out berhasil.",
+      ...(checkoutGpsEvaluation
+        ? {
+            accuracyMeters: checkoutGpsEvaluation.accuracyMeters,
+            maxAccuracyMeters: checkoutGpsEvaluation.maxAccuracyMeters,
+            distanceMeters: checkoutGpsEvaluation.roundedDistanceMeters,
+            allowedRadiusMeters: checkoutGpsEvaluation.allowedRadiusMeters,
+            accuracyAllowanceMeters: checkoutGpsEvaluation.accuracyAllowanceMeters,
+            effectiveAllowedRadiusMeters: checkoutGpsEvaluation.effectiveAllowedRadiusMeters
+          }
+        : {}),
       ...(isUnderMinMagangCheckout
         ? {
             accessLockCreated,
